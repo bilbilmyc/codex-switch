@@ -1,0 +1,1260 @@
+import { AboutSlint, ListView, ScrollView, Spinner } from "std-widgets.slint";
+import { Tokens } from "tokens.slint";
+
+export struct ProfileRow {
+    id: string,
+    name: string,
+    base-url: string,
+    model: string,
+    is-active: bool,
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <bool> on-dark: false;
+    callback clicked;
+
+    width: Tokens.icon-button-size;
+    height: Tokens.icon-button-size;
+    border-radius: Tokens.radius-md;
+    background: !root.enabled ? Tokens.transparent
+        : touch.pressed ? (root.on-dark ? Tokens.sidebar-pressed : Tokens.surface-pressed)
+        : touch.has-hover ? (root.on-dark ? Tokens.sidebar-hover : Tokens.surface-hover)
+        : Tokens.transparent;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled { root.clicked(); }
+    }
+
+    Image {
+        source: root.icon;
+        width: Tokens.icon-size;
+        height: Tokens.icon-size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        image-fit: contain;
+        colorize: !root.enabled ? (root.on-dark ? Tokens.sidebar-disabled : Tokens.rule-strong)
+            : root.danger && touch.has-hover ? Tokens.danger
+            : root.on-dark ? Tokens.sidebar-ink
+            : touch.pressed ? Tokens.ink
+            : Tokens.ink-secondary;
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-md;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    Tooltip { text: @markdown("\{root.accessible-name}"); }
+}
+
+component QuietButton inherits Rectangle {
+    in property <string> text;
+    in property <length> button-width: 64px;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <bool> on-dark: false;
+    callback clicked;
+
+    width: root.button-width;
+    height: Tokens.control-height;
+    border-radius: Tokens.radius-md;
+    background: !root.enabled ? Tokens.transparent
+        : touch.pressed ? (root.on-dark ? Tokens.sidebar-pressed : Tokens.surface-pressed)
+        : touch.has-hover ? (root.on-dark ? Tokens.sidebar-hover : Tokens.surface-hover)
+        : Tokens.transparent;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled { root.clicked(); }
+    }
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? (root.on-dark ? Tokens.sidebar-disabled : Tokens.rule-strong)
+            : root.danger ? Tokens.danger
+            : root.on-dark ? Tokens.sidebar-ink
+            : Tokens.ink-secondary;
+        font-size: Tokens.text-sm;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-md;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component CommandButton inherits Rectangle {
+    in property <string> text;
+    in property <length> button-width: 92px;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    callback clicked;
+
+    width: root.button-width;
+    height: Tokens.control-height;
+    border-radius: Tokens.radius-md;
+    border-width: 1px;
+    border-color: !root.enabled ? Tokens.rule
+        : root.primary ? (root.danger ? Tokens.danger : Tokens.ink)
+        : root.danger ? Tokens.danger
+        : Tokens.rule-strong;
+    background: !root.enabled ? Tokens.surface-raised
+        : root.primary && root.danger ? (touch.pressed ? Tokens.danger-hover : Tokens.danger)
+        : root.primary ? (touch.pressed ? Tokens.ink : touch.has-hover ? Tokens.ink-secondary : Tokens.ink)
+        : touch.pressed ? Tokens.surface-pressed
+        : touch.has-hover ? Tokens.surface-hover
+        : Tokens.surface;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled { root.clicked(); }
+    }
+
+    Text {
+        text: root.text;
+        color: !root.enabled ? Tokens.muted
+            : root.primary ? Tokens.accent-ink
+            : root.danger ? Tokens.danger
+            : Tokens.ink;
+        font-size: Tokens.text-sm;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: root.primary ? Tokens.accent : Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component TextField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <InputType> input-type: InputType.text;
+    in property <bool> enabled: true;
+    callback edited(string);
+
+    height: Tokens.control-height;
+    background: Tokens.field;
+    border-width: 1px;
+    border-color: input.has-focus ? Tokens.ink-secondary : Tokens.rule;
+    border-radius: Tokens.radius-md;
+    opacity: root.enabled ? 1 : 0.55;
+    forward-focus: input;
+
+    if root.text == "" && !input.has-focus: Text {
+        x: Tokens.space-xs;
+        width: parent.width - Tokens.space-md;
+        height: parent.height;
+        text: root.placeholder-text;
+        color: Tokens.muted;
+        font-size: Tokens.text-base;
+        font-weight: 400;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    input := TextInput {
+        x: Tokens.space-xs;
+        width: parent.width - Tokens.space-md;
+        height: parent.height;
+        text <=> root.text;
+        input-type: root.input-type;
+        enabled: root.enabled;
+        single-line: true;
+        font-size: Tokens.text-base;
+        font-weight: 400;
+        color: Tokens.ink;
+        selection-background-color: Tokens.accent;
+        selection-foreground-color: Tokens.accent-ink;
+        vertical-alignment: center;
+        edited => { root.edited(self.text); }
+    }
+
+    if input.has-focus: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-lg;
+        background: Tokens.transparent;
+    }
+}
+
+component ToggleRow inherits Rectangle {
+    in-out property <bool> checked;
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback toggled;
+
+    height: 28px;
+    opacity: root.enabled ? 1 : 0.55;
+    forward-focus: focus;
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-action-default => {
+        if root.enabled {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+
+    HorizontalLayout {
+        spacing: Tokens.space-xs;
+
+        Rectangle {
+            width: 16px;
+            height: 16px;
+            border-radius: Tokens.radius-sm;
+            border-width: 1px;
+            border-color: root.checked ? Tokens.ink : Tokens.rule-strong;
+            background: root.checked ? Tokens.ink : Tokens.field;
+
+            if root.checked: Image {
+                x: 2px;
+                y: 2px;
+                width: 12px;
+                height: 12px;
+                source: @image-url("../assets/icons/check.svg");
+                colorize: Tokens.accent-ink;
+                image-fit: contain;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Tokens.ink-secondary;
+            font-size: Tokens.text-sm;
+            font-weight: 500;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: -2px;
+        y: 1px;
+        width: parent.width + 4px;
+        height: parent.height - 2px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-md;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.checked = !root.checked;
+                root.toggled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component ModelSelect inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: -1;
+    in property <bool> enabled: true;
+    callback selected(string);
+    property <string> current-text: root.current-index >= 0 && root.current-index < root.model.length
+        ? root.model[root.current-index] : "选择模型";
+
+    height: Tokens.control-height;
+    background: Tokens.field;
+    border-width: 1px;
+    border-color: focus.has-focus ? Tokens.ink-secondary : Tokens.rule;
+    border-radius: Tokens.radius-md;
+    opacity: root.enabled ? 1 : 0.55;
+    forward-focus: focus;
+    accessible-role: combobox;
+    accessible-label: "模型";
+    accessible-value: root.current-text;
+    accessible-enabled: root.enabled;
+    accessible-expandable: true;
+    accessible-action-expand => { popup.show(); }
+
+    HorizontalLayout {
+        padding-left: Tokens.space-xs;
+        padding-right: Tokens.space-xs;
+        spacing: Tokens.space-xs;
+
+        Text {
+            text: root.current-text;
+            color: root.current-index >= 0 ? Tokens.ink : Tokens.muted;
+            font-size: Tokens.text-base;
+            font-weight: 400;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Image {
+            width: 16px;
+            height: 16px;
+            source: @image-url("../assets/icons/chevron-down.svg");
+            colorize: Tokens.ink-secondary;
+            image-fit: contain;
+            vertical-alignment: center;
+        }
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: -2px;
+        y: -2px;
+        width: parent.width + 4px;
+        height: parent.height + 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-lg;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { popup.show(); }
+    }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                popup.show();
+                return accept;
+            }
+            return reject;
+        }
+    }
+
+    popup := PopupWindow {
+        x: 0px;
+        width: root.width;
+        height: min(root.model.length, 6) * 32px + Tokens.space-xs;
+        y: -self.height - Tokens.space-2xs;
+        close-policy: close-on-click-outside;
+
+        Rectangle {
+            background: Tokens.surface;
+            border-width: 1px;
+            border-color: Tokens.rule-strong;
+            border-radius: Tokens.radius-md;
+
+            ListView {
+                x: Tokens.space-2xs;
+                y: Tokens.space-2xs;
+                width: parent.width - Tokens.space-xs;
+                height: parent.height - Tokens.space-xs;
+
+                for option[index] in root.model: Rectangle {
+                    height: 32px;
+                    border-radius: Tokens.radius-sm;
+                    background: root.current-index == index ? Tokens.selected-surface
+                        : option-touch.has-hover ? Tokens.surface-hover
+                        : Tokens.transparent;
+
+                    Text {
+                        x: Tokens.space-xs;
+                        width: parent.width - Tokens.space-md;
+                        text: option;
+                        color: Tokens.ink;
+                        font-size: Tokens.text-base;
+                        font-weight: 500;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    option-touch := TouchArea {
+                        clicked => {
+                            root.current-index = index;
+                            root.selected(option);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+component FieldLabel inherits Text {
+    in property <string> label;
+    text: root.label;
+    height: 16px;
+    color: Tokens.ink-secondary;
+    font-size: Tokens.text-sm;
+    font-weight: 600;
+    horizontal-alignment: left;
+    vertical-alignment: center;
+}
+
+component SectionLabel inherits Text {
+    in property <string> label;
+    text: root.label;
+    height: 20px;
+    color: Tokens.muted;
+    font-size: Tokens.text-sm;
+    font-weight: 700;
+    horizontal-alignment: left;
+    vertical-alignment: center;
+}
+
+component SummaryRow inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    height: 40px;
+    border-width: 0px;
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: parent.width;
+        background: Tokens.rule;
+    }
+    HorizontalLayout {
+        spacing: Tokens.space-md;
+        Text {
+            width: 108px;
+            text: root.label;
+            color: Tokens.ink-secondary;
+            font-size: Tokens.text-sm;
+            font-weight: 500;
+            horizontal-alignment: left;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.value;
+            color: Tokens.ink;
+            font-size: Tokens.text-base;
+            font-weight: 600;
+            horizontal-alignment: left;
+            vertical-alignment: center;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+}
+
+component StatusDot inherits Rectangle {
+    in property <color> dot-color;
+    width: 8px;
+    vertical-stretch: 1;
+    background: Tokens.transparent;
+    Rectangle {
+        y: (parent.height - self.height) / 2;
+        width: 7px;
+        height: 7px;
+        border-radius: 4px;
+        background: root.dot-color;
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Codex Switch";
+    icon: @image-url("../assets/app-icon.svg");
+    background: Tokens.paper;
+    default-font-size: Tokens.text-base;
+    preferred-width: 720px;
+    preferred-height: 480px;
+    min-width: 660px;
+    min-height: 440px;
+
+    in property <[ProfileRow]> profiles;
+    in property <[string]> model-names;
+    in-out property <int> selected-index: -1;
+    in-out property <int> model-index: -1;
+    in-out property <string> draft-name;
+    in-out property <string> draft-base-url;
+    in-out property <string> draft-api-key;
+    in-out property <string> draft-model;
+    in-out property <string> draft-review-model;
+    in-out property <bool> draft-dirty: false;
+    in-out property <bool> advanced-open: false;
+    in-out property <bool> editor-open: false;
+    in property <string> active-profile-name;
+    in property <string> model-cache-label;
+    in property <string> status-text: "就绪";
+    in property <int> status-tone: 0;
+    in property <bool> busy: false;
+    in property <bool> can-restore: false;
+    property <bool> selected-is-active: root.selected-index >= 0
+        && root.selected-index < root.profiles.length
+        && root.profiles[root.selected-index].is-active;
+
+    in-out property <bool> dialog-open: false;
+    in property <string> dialog-title;
+    in property <string> dialog-message;
+    in property <string> dialog-primary-text;
+    in property <string> dialog-secondary-text;
+    in property <string> dialog-tertiary-text;
+    in property <bool> dialog-primary-danger: false;
+    in-out property <bool> about-open: false;
+
+    callback profile-selected(int);
+    callback new-profile();
+    callback duplicate-profile();
+    callback delete-profile();
+    callback import-profiles();
+    callback import-current();
+    callback export-profiles();
+    callback restore-last();
+    callback refresh-models();
+    callback save-profile();
+    callback apply-profile();
+    callback discard-draft();
+    callback dialog-primary();
+    callback dialog-secondary();
+    callback dialog-tertiary();
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        sidebar := Rectangle {
+            min-width: 208px;
+            preferred-width: 220px;
+            max-width: 220px;
+            horizontal-stretch: 0;
+            background: Tokens.sidebar;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: 54px;
+                    background: Tokens.sidebar;
+                    HorizontalLayout {
+                        padding-left: Tokens.space-md;
+                        padding-right: Tokens.space-xs;
+                        spacing: Tokens.space-xs;
+                        Text {
+                            text: "中转站";
+                            color: Tokens.sidebar-ink;
+                            font-size: Tokens.text-base;
+                            font-weight: 700;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        IconButton {
+                            on-dark: true;
+                            enabled: !root.busy;
+                            icon: @image-url("../assets/icons/plus.svg");
+                            accessible-name: "新建中转站";
+                            clicked => { root.new-profile(); root.editor-open = true; }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Tokens.sidebar-rule; }
+
+                if root.profiles.length == 0: Rectangle {
+                    vertical-stretch: 1;
+                    background: Tokens.transparent;
+                    VerticalLayout {
+                        padding-left: Tokens.space-lg;
+                        padding-right: Tokens.space-lg;
+                        alignment: center;
+                        spacing: Tokens.space-sm;
+                        Text {
+                            text: "还没有中转站";
+                            color: Tokens.sidebar-ink;
+                            font-size: Tokens.text-base;
+                            font-weight: 600;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "可从当前 Codex 配置导入";
+                            color: Tokens.sidebar-muted;
+                            font-size: Tokens.text-sm;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        CommandButton {
+                            text: "导入当前配置";
+                            button-width: 116px;
+                            enabled: !root.busy;
+                            clicked => { root.import-current(); }
+                        }
+                    }
+                }
+
+                if root.profiles.length > 0: ListView {
+                    vertical-stretch: 1;
+                    for profile[index] in root.profiles: Rectangle {
+                        height: 56px;
+                        background: root.selected-index == index ? Tokens.sidebar-selected
+                            : row-touch.has-hover ? Tokens.sidebar-hover
+                            : Tokens.transparent;
+
+                        if root.selected-index == index: Rectangle {
+                            x: 0px;
+                            y: 9px;
+                            width: 3px;
+                            height: parent.height - 18px;
+                            border-radius: 2px;
+                            background: Tokens.accent;
+                        }
+
+                        HorizontalLayout {
+                            padding-left: Tokens.space-md;
+                            padding-right: Tokens.space-sm;
+                            spacing: Tokens.space-xs;
+                            VerticalLayout {
+                                spacing: 1px;
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: profile.name;
+                                    color: Tokens.sidebar-ink;
+                                    font-size: Tokens.text-base;
+                                    font-weight: 600;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: profile.model == "" ? "未设置模型" : profile.model;
+                                    color: Tokens.sidebar-muted;
+                                    font-size: Tokens.text-xs;
+                                    horizontal-alignment: left;
+                                    overflow: elide;
+                                }
+                            }
+                            Text {
+                                width: 40px;
+                                text: profile.is-active ? "使用中" : "";
+                                color: Tokens.sidebar-success;
+                                font-size: Tokens.text-sm;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                            }
+                        }
+                        row-touch := TouchArea {
+                            enabled: !root.busy;
+                            clicked => { root.profile-selected(index); }
+                        }
+                    }
+                }
+
+                Rectangle { height: 1px; background: Tokens.sidebar-rule; }
+                Rectangle {
+                    height: 46px;
+                    background: Tokens.sidebar;
+                    HorizontalLayout {
+                        padding-left: 6px;
+                        padding-right: 6px;
+                        spacing: 0px;
+                        QuietButton {
+                            text: "导入";
+                            button-width: 44px;
+                            on-dark: true;
+                            enabled: !root.busy;
+                            clicked => { root.import-profiles(); }
+                        }
+                        QuietButton {
+                            text: "导出";
+                            button-width: 44px;
+                            on-dark: true;
+                            enabled: root.profiles.length > 0 && !root.busy;
+                            clicked => { root.export-profiles(); }
+                        }
+                        QuietButton {
+                            text: "恢复";
+                            button-width: 44px;
+                            on-dark: true;
+                            enabled: root.can-restore && !root.busy;
+                            clicked => { root.restore-last(); }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+                        IconButton {
+                            on-dark: true;
+                            icon: @image-url("../assets/icons/info.svg");
+                            accessible-name: "关于 Codex Switch";
+                            clicked => { root.about-open = true; }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            min-width: 440px;
+            horizontal-stretch: 1;
+            background: Tokens.paper;
+
+            if root.selected-index < 0: VerticalLayout {
+                alignment: center;
+                spacing: Tokens.space-xs;
+                Text {
+                    text: root.profiles.length == 0 ? "创建一个中转站" : "选择一个中转站";
+                    color: Tokens.ink;
+                    font-size: Tokens.text-md;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                }
+                Text {
+                    text: root.profiles.length == 0 ? "填写连接信息后保存" : "查看当前连接和模型";
+                    color: Tokens.muted;
+                    font-size: Tokens.text-sm;
+                    horizontal-alignment: center;
+                }
+            }
+
+            if root.selected-index >= 0: VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: 68px;
+                    background: Tokens.surface;
+                    HorizontalLayout {
+                        padding-left: Tokens.space-lg;
+                        padding-right: Tokens.space-lg;
+                        spacing: Tokens.space-md;
+                        VerticalLayout {
+                            spacing: 1px;
+                            alignment: center;
+                            horizontal-stretch: 1;
+                            Text {
+                                text: root.draft-name == "" ? "未命名中转站" : root.draft-name;
+                                color: Tokens.ink;
+                                font-size: Tokens.text-lg;
+                                font-weight: 700;
+                                horizontal-stretch: 1;
+                                horizontal-alignment: left;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: root.draft-base-url == "" ? "未设置接口地址" : root.draft-base-url;
+                                color: Tokens.muted;
+                                font-size: Tokens.text-sm;
+                                horizontal-stretch: 1;
+                                horizontal-alignment: left;
+                                overflow: elide;
+                            }
+                        }
+                        Text {
+                            width: 64px;
+                            text: root.selected-is-active ? "使用中" : "";
+                            color: Tokens.success;
+                            font-size: Tokens.text-sm;
+                            font-weight: 700;
+                            vertical-alignment: center;
+                            horizontal-alignment: right;
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Tokens.rule; }
+
+                VerticalLayout {
+                    padding-left: Tokens.space-lg;
+                    padding-right: Tokens.space-lg;
+                    padding-top: Tokens.space-md;
+                    padding-bottom: Tokens.space-md;
+                    spacing: 0px;
+                    vertical-stretch: 1;
+
+                    SectionLabel { label: "连接"; }
+                    Rectangle { height: 1px; background: Tokens.rule; }
+                    SummaryRow { label: "接口地址"; value: root.draft-base-url; }
+                    SummaryRow { label: "API Key"; value: root.draft-api-key == "" ? "未配置" : "已配置"; }
+
+                    Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                    SectionLabel { label: "模型"; }
+                    Rectangle { height: 1px; background: Tokens.rule; }
+                    SummaryRow { label: "默认模型"; value: root.draft-model == "" ? "未设置" : root.draft-model; }
+                    SummaryRow {
+                        label: "审查模型";
+                        value: root.advanced-open && root.draft-review-model != ""
+                            ? root.draft-review-model : "跟随默认模型";
+                    }
+                    SummaryRow { label: "模型列表"; value: root.model-cache-label; }
+
+                    Rectangle { vertical-stretch: 1; background: Tokens.transparent; }
+                }
+
+                Rectangle {
+                    height: 52px;
+                    background: Tokens.surface;
+                    Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
+                    HorizontalLayout {
+                        padding-left: Tokens.space-lg;
+                        padding-right: Tokens.space-md;
+                        spacing: Tokens.space-xs;
+                        Rectangle {
+                            width: 18px;
+                            height: 18px;
+                            background: Tokens.transparent;
+                            if root.busy: Spinner { width: 18px; height: 18px; }
+                            if !root.busy: StatusDot {
+                                x: 5px;
+                                dot-color: root.status-tone == 1 ? Tokens.success
+                                    : root.status-tone == 2 ? Tokens.warning
+                                    : root.status-tone == 3 ? Tokens.danger
+                                    : Tokens.rule-strong;
+                            }
+                        }
+                        Text {
+                            text: root.status-text;
+                            color: root.status-tone == 3 ? Tokens.danger : Tokens.ink-secondary;
+                            font-size: Tokens.text-sm;
+                            horizontal-alignment: left;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        CommandButton {
+                            text: "编辑配置";
+                            button-width: 84px;
+                            enabled: !root.busy;
+                            clicked => { root.editor-open = true; }
+                        }
+                        CommandButton {
+                            text: root.busy ? "正在切换"
+                                : root.selected-is-active ? "重新切换"
+                                : "切换到此中转站";
+                            button-width: 120px;
+                            primary: true;
+                            enabled: !root.busy;
+                            clicked => { root.apply-profile(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.editor-open && root.selected-index >= 0: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: Tokens.overlay;
+        TouchArea { }
+
+        editor := Rectangle {
+            width: min(parent.width - 32px, 560px);
+            height: min(parent.height - 8px, 408px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Tokens.paper;
+            border-width: 1px;
+            border-color: Tokens.rule-strong;
+            border-radius: Tokens.radius-lg;
+            clip: true;
+
+            VerticalLayout {
+                spacing: 0px;
+
+                Rectangle {
+                    height: 48px;
+                    background: Tokens.surface;
+                    HorizontalLayout {
+                        padding-left: Tokens.space-md;
+                        padding-right: Tokens.space-xs;
+                        spacing: Tokens.space-2xs;
+                        Text {
+                            text: "编辑中转站";
+                            color: Tokens.ink;
+                            font-size: Tokens.text-md;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: left;
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            width: 48px;
+                            text: root.draft-dirty ? "未保存" : "";
+                            color: Tokens.warning;
+                            font-size: Tokens.text-sm;
+                            font-weight: 600;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                        IconButton {
+                            icon: @image-url("../assets/icons/copy.svg");
+                            accessible-name: "复制此中转站";
+                            clicked => { root.duplicate-profile(); }
+                        }
+                        IconButton {
+                            danger: true;
+                            icon: @image-url("../assets/icons/trash.svg");
+                            accessible-name: "删除此中转站";
+                            clicked => { root.delete-profile(); }
+                        }
+                    }
+                }
+                Rectangle { height: 1px; background: Tokens.rule; }
+
+                edit-scroll := ScrollView {
+                    vertical-stretch: 1;
+                    horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+                    viewport-width: self.visible-width;
+
+                    VerticalLayout {
+                        width: edit-scroll.visible-width - 32px;
+                        x: 16px;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
+                        spacing: 0px;
+
+                        SectionLabel { label: "连接"; }
+                        Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                        HorizontalLayout {
+                            height: 54px;
+                            spacing: Tokens.space-xs;
+                            VerticalLayout {
+                                width: 156px;
+                                spacing: Tokens.space-2xs;
+                                FieldLabel { label: "名称"; }
+                                TextField {
+                                    text <=> root.draft-name;
+                                    placeholder-text: "我的中转站";
+                                    enabled: !root.busy;
+                                    edited(value) => { root.draft-name = value; root.draft-dirty = true; }
+                                }
+                            }
+                            VerticalLayout {
+                                spacing: Tokens.space-2xs;
+                                horizontal-stretch: 1;
+                                FieldLabel { label: "接口地址"; }
+                                TextField {
+                                    text <=> root.draft-base-url;
+                                    placeholder-text: "https://relay.example/v1";
+                                    enabled: !root.busy;
+                                    edited(value) => { root.draft-base-url = value; root.draft-dirty = true; }
+                                }
+                            }
+                        }
+                        Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                        VerticalLayout {
+                            height: 54px;
+                            spacing: Tokens.space-2xs;
+                            FieldLabel { label: "API Key"; }
+                            TextField {
+                                text <=> root.draft-api-key;
+                                placeholder-text: "sk-…";
+                                input-type: InputType.password;
+                                enabled: !root.busy;
+                                edited(value) => { root.draft-api-key = value; root.draft-dirty = true; }
+                            }
+                        }
+
+                        Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                        Rectangle { height: 1px; background: Tokens.rule; }
+                        Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                        SectionLabel { label: "模型"; }
+                        Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                        HorizontalLayout {
+                            height: 54px;
+                            spacing: Tokens.space-xs;
+                            VerticalLayout {
+                                spacing: Tokens.space-2xs;
+                                horizontal-stretch: 1;
+                                FieldLabel { label: "默认模型"; }
+                                HorizontalLayout {
+                                    height: Tokens.control-height;
+                                    spacing: Tokens.space-xs;
+                                    Rectangle {
+                                        height: Tokens.control-height;
+                                        horizontal-stretch: 1;
+                                        if root.model-names.length > 0: ModelSelect {
+                                            width: parent.width;
+                                            model: root.model-names;
+                                            current-index <=> root.model-index;
+                                            enabled: !root.busy;
+                                            selected(value) => { root.draft-model = value; root.draft-dirty = true; }
+                                        }
+                                        if root.model-names.length == 0: TextField {
+                                            width: parent.width;
+                                            text <=> root.draft-model;
+                                            placeholder-text: "gpt-…";
+                                            enabled: !root.busy;
+                                            edited(value) => { root.draft-model = value; root.draft-dirty = true; root.model-index = -1; }
+                                        }
+                                    }
+                                    IconButton {
+                                        enabled: root.draft-base-url != "" && root.draft-api-key != "" && !root.busy;
+                                        icon: @image-url("../assets/icons/refresh.svg");
+                                        accessible-name: "刷新模型列表";
+                                        clicked => { root.refresh-models(); }
+                                    }
+                                }
+                            }
+                            VerticalLayout {
+                                width: 172px;
+                                spacing: Tokens.space-2xs;
+                                FieldLabel { label: "审查模型"; }
+                                TextField {
+                                    text <=> root.draft-review-model;
+                                    placeholder-text: "跟随默认模型";
+                                    enabled: root.advanced-open && !root.busy;
+                                    edited(value) => { root.draft-review-model = value; root.draft-dirty = true; }
+                                }
+                            }
+                        }
+                        Text {
+                            height: 15px;
+                            text: root.model-cache-label;
+                            color: Tokens.muted;
+                            font-size: Tokens.text-xs;
+                            overflow: elide;
+                        }
+                        Rectangle { height: Tokens.space-2xs; background: Tokens.transparent; }
+                        ToggleRow {
+                            text: "为审查任务使用其他模型";
+                            checked <=> root.advanced-open;
+                            enabled: !root.busy;
+                            toggled => {
+                                root.draft-dirty = true;
+                                if !self.checked { root.draft-review-model = ""; }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 48px;
+                    background: Tokens.surface;
+                    Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
+                    HorizontalLayout {
+                        padding-left: Tokens.space-md;
+                        padding-right: Tokens.space-md;
+                        spacing: Tokens.space-xs;
+                        Text {
+                            text: root.status-text;
+                            color: root.status-tone == 3 ? Tokens.danger : Tokens.ink-secondary;
+                            font-size: Tokens.text-sm;
+                            horizontal-alignment: left;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        QuietButton {
+                            text: "取消";
+                            button-width: 64px;
+                            enabled: !root.busy;
+                            clicked => { root.discard-draft(); root.editor-open = false; }
+                        }
+                        CommandButton {
+                            text: "保存";
+                            button-width: 72px;
+                            enabled: root.draft-dirty && !root.busy;
+                            clicked => { root.save-profile(); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.dialog-open: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: Tokens.overlay;
+        TouchArea { }
+        Rectangle {
+            width: min(parent.width - 48px, 480px);
+            height: 236px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Tokens.surface;
+            border-width: 1px;
+            border-color: Tokens.rule-strong;
+            border-radius: Tokens.radius-lg;
+            VerticalLayout {
+                padding: Tokens.space-lg;
+                spacing: Tokens.space-md;
+                Text {
+                    text: root.dialog-title;
+                    color: Tokens.ink;
+                    font-size: Tokens.text-md;
+                    font-weight: 700;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: left;
+                }
+                Text {
+                    text: root.dialog-message;
+                    color: Tokens.ink-secondary;
+                    font-size: Tokens.text-base;
+                    wrap: word-wrap;
+                    vertical-stretch: 1;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: left;
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    spacing: Tokens.space-xs;
+                    if root.dialog-tertiary-text != "": QuietButton {
+                        text: root.dialog-tertiary-text;
+                        button-width: 64px;
+                        clicked => { root.dialog-tertiary(); }
+                    }
+                    if root.dialog-secondary-text != "": CommandButton {
+                        text: root.dialog-secondary-text;
+                        button-width: 104px;
+                        clicked => { root.dialog-secondary(); }
+                    }
+                    CommandButton {
+                        text: root.dialog-primary-text;
+                        button-width: 104px;
+                        primary: true;
+                        danger: root.dialog-primary-danger;
+                        clicked => { root.dialog-primary(); }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.about-open: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: root.width;
+        height: root.height;
+        background: Tokens.overlay;
+        TouchArea { }
+        Rectangle {
+            width: min(parent.width - 48px, 440px);
+            height: 340px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Tokens.surface;
+            border-width: 1px;
+            border-color: Tokens.rule-strong;
+            border-radius: Tokens.radius-lg;
+            VerticalLayout {
+                padding: Tokens.space-lg;
+                spacing: Tokens.space-sm;
+                HorizontalLayout {
+                    spacing: Tokens.space-xs;
+                    VerticalLayout {
+                        spacing: 1px;
+                        horizontal-stretch: 1;
+                        Text {
+                            text: "Codex Switch";
+                            color: Tokens.ink;
+                            font-size: Tokens.text-lg;
+                            font-weight: 700;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: left;
+                        }
+                        Text {
+                            text: "版本 0.1.0";
+                            color: Tokens.muted;
+                            font-size: Tokens.text-sm;
+                            horizontal-stretch: 1;
+                            horizontal-alignment: left;
+                        }
+                    }
+                    QuietButton {
+                        text: "关闭";
+                        button-width: 64px;
+                        clicked => { root.about-open = false; }
+                    }
+                }
+                AboutSlint { vertical-stretch: 1; }
+            }
+        }
+    }
+}

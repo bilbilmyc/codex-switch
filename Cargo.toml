@@ -1,0 +1,69 @@
+[package]
+name = "codex-switch"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "A small desktop switcher for Codex relay providers and default models"
+license = "MIT"
+repository = "https://github.com/bilbilmyc/codex-switch"
+build = "build.rs"
+
+[dependencies]
+directories = "6"
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls", "system-proxy"] }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.11"
+slint = { version = "=1.17.1", default-features = false, features = [
+  "std",
+  "backend-winit",
+  "renderer-femtovg",
+  "renderer-software",
+  "accessibility",
+  "compat-1-2",
+] }
+sysinfo = "0.39"
+tempfile = "3.27"
+thiserror = "2"
+toml = "1.1"
+toml_edit = "0.25"
+url = "2.5"
+uuid = { version = "1", features = ["serde", "v4"] }
+
+[build-dependencies]
+slint-build = "=1.17.1"
+
+[dev-dependencies]
+tiny_http = "0.12"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[package.metadata.packager]
+product-name = "Codex Switch"
+identifier = "com.mayc.codex-switch"
+description = "A lightweight desktop switcher for Codex relay providers and default models"
+long-description = "Switch API-key-based Codex relay providers and their default or review models without replacing unrelated Codex settings."
+category = "Utility"
+before-packaging-command = "cargo build --release"
+formats = ["default"]
+license-file = "LICENSE"
+icons = [
+  "assets/app-icon.png",
+  "assets/app-icon.icns",
+  "assets/app-icon.ico",
+]
+resources = ["LICENSE", "THIRD_PARTY_LICENSES.md"]
+
+[package.metadata.packager.nsis]
+installMode = "currentUser"
+installerIcon = "assets/app-icon.ico"
