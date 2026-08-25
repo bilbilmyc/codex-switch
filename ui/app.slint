@@ -1,4 +1,4 @@
-// Hallmark · pre-emit critique: P4 H5 E4 S5 R5 V4
+// Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4
 import { AboutSlint, ListView, ScrollView, Spinner } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 
@@ -16,14 +16,21 @@ component IconButton inherits Rectangle {
     in property <bool> enabled: true;
     in property <bool> danger: false;
     in property <bool> on-dark: false;
+    in property <bool> outlined: false;
     callback clicked;
 
     width: Tokens.icon-button-size;
     height: Tokens.icon-button-size;
     border-radius: Tokens.radius-md;
-    background: !root.enabled ? Tokens.transparent
+    border-width: 1px;
+    border-color: !root.outlined ? Tokens.transparent
+        : !root.enabled ? Tokens.rule
+        : touch.has-hover ? Tokens.ink-secondary
+        : Tokens.control-rule;
+    background: !root.enabled ? (root.outlined ? Tokens.surface-raised : Tokens.transparent)
         : touch.pressed ? (root.on-dark ? Tokens.sidebar-pressed : Tokens.surface-pressed)
         : touch.has-hover ? (root.on-dark ? Tokens.sidebar-hover : Tokens.surface-hover)
+        : root.outlined ? Tokens.surface
         : Tokens.transparent;
     forward-focus: focus;
     accessible-role: button;
@@ -307,7 +314,7 @@ component TextField inherits Rectangle {
     height: Tokens.control-height;
     background: Tokens.field;
     border-width: 1px;
-    border-color: input.has-focus ? Tokens.ink-secondary : Tokens.rule;
+    border-color: input.has-focus ? Tokens.ink-secondary : Tokens.control-rule;
     border-radius: Tokens.radius-md;
     opacity: root.enabled ? 1 : 0.55;
     forward-focus: input;
@@ -342,13 +349,13 @@ component TextField inherits Rectangle {
     }
 
     if input.has-focus: Rectangle {
-        x: -2px;
-        y: -2px;
-        width: parent.width + 4px;
-        height: parent.height + 4px;
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
         border-width: 2px;
         border-color: Tokens.focus;
-        border-radius: Tokens.radius-lg;
+        border-radius: Tokens.radius-sm;
         background: Tokens.transparent;
     }
 }
@@ -406,13 +413,13 @@ component ToggleRow inherits Rectangle {
     }
 
     if focus.has-focus && root.enabled: Rectangle {
-        x: -2px;
-        y: 1px;
-        width: parent.width + 4px;
-        height: parent.height - 2px;
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
         border-width: 2px;
         border-color: Tokens.focus;
-        border-radius: Tokens.radius-md;
+        border-radius: Tokens.radius-sm;
         background: Tokens.transparent;
     }
 
@@ -449,7 +456,7 @@ component ModelSelect inherits Rectangle {
     height: Tokens.control-height;
     background: Tokens.field;
     border-width: 1px;
-    border-color: focus.has-focus ? Tokens.ink-secondary : Tokens.rule;
+    border-color: focus.has-focus ? Tokens.ink-secondary : Tokens.control-rule;
     border-radius: Tokens.radius-md;
     opacity: root.enabled ? 1 : 0.55;
     forward-focus: focus;
@@ -485,13 +492,13 @@ component ModelSelect inherits Rectangle {
     }
 
     if focus.has-focus && root.enabled: Rectangle {
-        x: -2px;
-        y: -2px;
-        width: parent.width + 4px;
-        height: parent.height + 4px;
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
         border-width: 2px;
         border-color: Tokens.focus;
-        border-radius: Tokens.radius-lg;
+        border-radius: Tokens.radius-sm;
         background: Tokens.transparent;
     }
 
@@ -567,7 +574,7 @@ component FieldLabel inherits Text {
     height: 16px;
     color: Tokens.ink-secondary;
     font-size: Tokens.text-sm;
-    font-weight: 600;
+    font-weight: 500;
     horizontal-alignment: left;
     vertical-alignment: center;
 }
@@ -576,8 +583,8 @@ component SectionLabel inherits Text {
     in property <string> label;
     text: root.label;
     height: 20px;
-    color: Tokens.muted;
-    font-size: Tokens.text-sm;
+    color: Tokens.ink;
+    font-size: Tokens.text-base;
     font-weight: 700;
     horizontal-alignment: left;
     vertical-alignment: center;
@@ -704,11 +711,13 @@ export component AppWindow inherits Window {
                 spacing: 0px;
 
                 Rectangle {
-                    height: 54px;
+                    height: Tokens.toolbar-height;
                     background: Tokens.sidebar;
                     HorizontalLayout {
                         padding-left: Tokens.space-md;
                         padding-right: Tokens.space-xs;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
                         spacing: Tokens.space-xs;
                         Text {
                             text: "中转站";
@@ -821,11 +830,13 @@ export component AppWindow inherits Window {
 
                 Rectangle { height: 1px; background: Tokens.sidebar-rule; }
                 Rectangle {
-                    height: 46px;
+                    height: Tokens.toolbar-height;
                     background: Tokens.sidebar;
                     HorizontalLayout {
                         padding-left: 6px;
                         padding-right: 6px;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
                         spacing: 0px;
                         QuietButton {
                             text: "导入";
@@ -956,20 +967,27 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 52px;
+                    height: Tokens.toolbar-height;
                     background: Tokens.surface;
                     Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
                     HorizontalLayout {
                         padding-left: Tokens.space-lg;
                         padding-right: Tokens.space-md;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
                         spacing: Tokens.space-xs;
                         Rectangle {
                             width: 18px;
-                            height: 18px;
+                            height: Tokens.control-height;
                             background: Tokens.transparent;
-                            if root.busy: Spinner { width: 18px; height: 18px; }
+                            if root.busy: Spinner {
+                                y: (parent.height - self.height) / 2;
+                                width: 18px;
+                                height: 18px;
+                            }
                             if !root.busy: StatusDot {
                                 x: 5px;
+                                height: parent.height;
                                 dot-color: root.status-tone == 1 ? Tokens.success
                                     : root.status-tone == 2 ? Tokens.warning
                                     : root.status-tone == 3 ? Tokens.danger
@@ -981,6 +999,7 @@ export component AppWindow inherits Window {
                             color: root.status-tone == 3 ? Tokens.danger : Tokens.ink-secondary;
                             font-size: Tokens.text-sm;
                             horizontal-alignment: left;
+                            vertical-alignment: center;
                             overflow: elide;
                             horizontal-stretch: 1;
                         }
@@ -1014,8 +1033,8 @@ export component AppWindow inherits Window {
         TouchArea { }
 
         editor := Rectangle {
-            width: min(parent.width - 32px, 560px);
-            height: min(parent.height - 8px, 408px);
+            width: min(parent.width - 32px, 584px);
+            height: min(parent.height - 16px, 432px);
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: Tokens.paper;
@@ -1028,11 +1047,13 @@ export component AppWindow inherits Window {
                 spacing: 0px;
 
                 Rectangle {
-                    height: 48px;
+                    height: Tokens.toolbar-height;
                     background: Tokens.surface;
                     HorizontalLayout {
                         padding-left: Tokens.space-md;
                         padding-right: Tokens.space-xs;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
                         spacing: Tokens.space-2xs;
                         Text {
                             text: "编辑中转站";
@@ -1054,6 +1075,7 @@ export component AppWindow inherits Window {
                         }
                         IconButton {
                             enabled: !root.busy;
+                            outlined: true;
                             icon: @image-url("../assets/icons/copy.svg");
                             accessible-name: "复制此中转站";
                             clicked => { root.duplicate-profile(); }
@@ -1072,7 +1094,6 @@ export component AppWindow inherits Window {
                 edit-scroll := ScrollView {
                     vertical-stretch: 1;
                     horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
-                    viewport-width: self.visible-width;
 
                     VerticalLayout {
                         width: edit-scroll.visible-width - 32px;
@@ -1084,7 +1105,7 @@ export component AppWindow inherits Window {
                         SectionLabel { label: "连接"; }
                         Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
                         HorizontalLayout {
-                            height: 54px;
+                            height: Tokens.field-row-height;
                             spacing: Tokens.space-xs;
                             VerticalLayout {
                                 width: 156px;
@@ -1111,7 +1132,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
                         VerticalLayout {
-                            height: 54px;
+                            height: Tokens.field-row-height;
                             spacing: Tokens.space-2xs;
                             FieldLabel { label: "API Key"; }
                             TextField {
@@ -1129,7 +1150,7 @@ export component AppWindow inherits Window {
                         SectionLabel { label: "模型"; }
                         Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
                         HorizontalLayout {
-                            height: 54px;
+                            height: Tokens.field-row-height;
                             spacing: Tokens.space-xs;
                             VerticalLayout {
                                 spacing: Tokens.space-2xs;
@@ -1158,6 +1179,7 @@ export component AppWindow inherits Window {
                                     }
                                     IconButton {
                                         enabled: root.draft-base-url != "" && root.draft-api-key != "" && !root.busy;
+                                        outlined: true;
                                         icon: @image-url("../assets/icons/refresh.svg");
                                         accessible-name: "刷新模型列表";
                                         clicked => { root.refresh-models(); }
@@ -1181,6 +1203,7 @@ export component AppWindow inherits Window {
                             text: root.model-cache-label;
                             color: Tokens.muted;
                             font-size: Tokens.text-xs;
+                            vertical-alignment: center;
                             overflow: elide;
                         }
                         Rectangle { height: Tokens.space-2xs; background: Tokens.transparent; }
@@ -1197,18 +1220,21 @@ export component AppWindow inherits Window {
                 }
 
                 Rectangle {
-                    height: 48px;
+                    height: Tokens.toolbar-height;
                     background: Tokens.surface;
                     Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
                     HorizontalLayout {
                         padding-left: Tokens.space-md;
                         padding-right: Tokens.space-md;
+                        padding-top: Tokens.space-xs;
+                        padding-bottom: Tokens.space-xs;
                         spacing: Tokens.space-xs;
                         Text {
                             text: root.status-text;
                             color: root.status-tone == 3 ? Tokens.danger : Tokens.ink-secondary;
                             font-size: Tokens.text-sm;
                             horizontal-alignment: left;
+                            vertical-alignment: center;
                             overflow: elide;
                             horizontal-stretch: 1;
                         }
