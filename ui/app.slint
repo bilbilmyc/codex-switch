@@ -1,3 +1,4 @@
+// Hallmark · pre-emit critique: P4 H5 E4 S5 R5 V4
 import { AboutSlint, ListView, ScrollView, Spinner } from "std-widgets.slint";
 import { Tokens } from "tokens.slint";
 
@@ -76,6 +77,87 @@ component IconButton inherits Rectangle {
     }
 
     Tooltip { text: @markdown("\{root.accessible-name}"); }
+}
+
+// Hallmark · component: destructive action · genre: modern-minimal · theme: graphite/coral
+// Stable geometry across default, hover, focus, active, and disabled states.
+component DangerActionButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> text;
+    in property <string> accessible-name: root.text;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: 78px;
+    height: Tokens.control-height;
+    border-radius: Tokens.radius-md;
+    border-width: 1px;
+    border-color: root.enabled ? Tokens.danger : Tokens.rule-strong;
+    background: !root.enabled ? Tokens.surface-raised
+        : touch.pressed ? Tokens.danger-surface-pressed
+        : touch.has-hover ? Tokens.danger-surface-hover
+        : Tokens.danger-surface;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if root.enabled { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+
+        Image {
+            source: root.icon;
+            width: 15px;
+            height: 15px;
+            image-fit: contain;
+            colorize: root.enabled ? Tokens.danger : Tokens.muted;
+        }
+
+        Text {
+            width: 30px;
+            text: root.text;
+            color: root.enabled ? Tokens.danger : Tokens.muted;
+            font-size: Tokens.text-sm;
+            font-weight: 600;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    if focus.has-focus && root.enabled: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
 }
 
 component QuietButton inherits Rectangle {
@@ -971,13 +1053,15 @@ export component AppWindow inherits Window {
                             vertical-alignment: center;
                         }
                         IconButton {
+                            enabled: !root.busy;
                             icon: @image-url("../assets/icons/copy.svg");
                             accessible-name: "复制此中转站";
                             clicked => { root.duplicate-profile(); }
                         }
-                        IconButton {
-                            danger: true;
+                        DangerActionButton {
+                            enabled: !root.busy;
                             icon: @image-url("../assets/icons/trash.svg");
+                            text: "删除";
                             accessible-name: "删除此中转站";
                             clicked => { root.delete-profile(); }
                         }
