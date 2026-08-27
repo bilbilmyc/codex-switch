@@ -48,11 +48,26 @@ jobs:
       - name: Run tests
         run: cargo test --all-targets
 
+  create-release:
+    name: Create GitHub Release
+    needs: [check, validate-release-version]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   package:
     name: Package (${{ matrix.name }})
-    needs: [check, validate-release-version]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: [check, validate-release-version, create-release]
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -73,30 +88,8 @@ jobs:
         run: cargo install cargo-packager --version 0.11.8 --locked
       - name: Build native installer
         run: cargo packager --release
-      - name: Upload installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: Codex-Switch-${{ matrix.artifact }}
-          path: ${{ matrix.package_glob }}
-          if-no-files-found: error
-          retention-days: 3
-
-  release:
-    name: Publish GitHub Release
-    needs: package
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download installers
-        uses: actions/download-artifact@v4
-        with:
-          pattern: Codex-Switch-*
-          path: release
-          merge-multiple: true
-      - name: Create release
+      - name: Upload installer to the release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
-          files: release/*
+          files: ${{ matrix.package_glob }}
+          fail_on_unmatched_files: true
