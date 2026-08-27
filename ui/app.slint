@@ -10,6 +10,28 @@ export struct ProfileRow {
     is-active: bool,
 }
 
+export struct InstructionRow {
+    name: string,
+    detail: string,
+    enabled: bool,
+}
+
+export struct UsageModelRow {
+    model: string,
+    input: string,
+    cached: string,
+    output: string,
+    calls: string,
+}
+
+export struct UsageTrendRow {
+    date: string,
+    input: string,
+    cached: string,
+    output: string,
+    calls: string,
+}
+
 component IconButton inherits Rectangle {
     in property <image> icon;
     in property <string> accessible-name;
@@ -367,6 +389,79 @@ component TextField inherits Rectangle {
     }
 }
 
+component UnitNumberField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder-text;
+    in property <string> unit;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    callback edited(string);
+
+    width: Tokens.context-control-width;
+    height: Tokens.control-height;
+    background: Tokens.surface;
+    border-width: 1px;
+    border-color: input.has-focus ? Tokens.ink-secondary : Tokens.control-rule;
+    border-radius: Tokens.radius-md;
+    opacity: root.enabled ? 1 : 0.55;
+    forward-focus: input;
+
+    if root.text == "" && !input.has-focus: Text {
+        x: Tokens.space-xs;
+        width: parent.width - 52px;
+        height: parent.height;
+        text: root.placeholder-text;
+        color: Tokens.muted;
+        font-size: Tokens.text-base;
+        font-weight: 400;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    input := TextInput {
+        x: Tokens.space-xs;
+        width: parent.width - 52px;
+        height: parent.height;
+        text <=> root.text;
+        input-type: InputType.text;
+        enabled: root.enabled;
+        single-line: true;
+        font-size: Tokens.text-base;
+        font-weight: 700;
+        color: Tokens.ink;
+        selection-background-color: Tokens.accent;
+        selection-foreground-color: Tokens.accent-ink;
+        horizontal-alignment: right;
+        vertical-alignment: center;
+        accessible-label: root.accessible-name;
+        edited => { root.edited(self.text); }
+    }
+
+    Text {
+        x: parent.width - 36px;
+        width: 24px;
+        height: parent.height;
+        text: root.unit;
+        color: Tokens.muted;
+        font-size: Tokens.text-sm;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if input.has-focus: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+}
+
 component ToggleRow inherits Rectangle {
     in-out property <bool> checked;
     in property <string> text;
@@ -666,15 +761,454 @@ component StatusDot inherits Rectangle {
     }
 }
 
+component NavTab inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+
+    width: 66px;
+    height: 40px;
+    background: touch.pressed ? Tokens.surface-pressed
+        : touch.has-hover ? Tokens.surface-hover
+        : Tokens.transparent;
+    forward-focus: focus;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    Text {
+        text: root.text;
+        color: root.selected ? Tokens.ink : Tokens.muted;
+        font-size: Tokens.text-base;
+        font-weight: root.selected ? 700 : 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if root.selected: Rectangle {
+        x: 9px;
+        y: parent.height - 3px;
+        width: parent.width - 18px;
+        height: 3px;
+        border-radius: 2px;
+        background: Tokens.accent;
+    }
+    if focus.has-focus: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 5px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component SegmentButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked;
+
+    min-width: 76px;
+    height: 30px;
+    horizontal-stretch: 1;
+    border-radius: Tokens.radius-md;
+    background: root.selected ? Tokens.ink
+        : touch.pressed ? Tokens.surface-pressed
+        : touch.has-hover ? Tokens.surface-hover
+        : Tokens.transparent;
+    forward-focus: focus;
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+
+    Text {
+        text: root.text;
+        color: root.selected ? Tokens.accent-ink : Tokens.ink-secondary;
+        font-size: Tokens.text-sm;
+        font-weight: root.selected ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if focus.has-focus: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component StepButton inherits Rectangle {
+    in property <string> symbol;
+    in property <string> accessible-name;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: 36px;
+    height: 34px;
+    border-radius: Tokens.radius-sm;
+    background: !root.enabled ? Tokens.surface-raised
+        : touch.pressed ? Tokens.surface-pressed
+        : touch.has-hover ? Tokens.surface-hover
+        : Tokens.transparent;
+    opacity: root.enabled ? 1 : 0.5;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+
+    Text {
+        text: root.symbol;
+        color: Tokens.ink;
+        font-size: Tokens.text-md;
+        font-weight: 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if focus.has-focus && root.enabled: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-sm;
+        background: Tokens.transparent;
+    }
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component ValueStepper inherits Rectangle {
+    in-out property <int> value;
+    in property <int> minimum;
+    in property <int> maximum;
+    in property <int> step;
+    in property <string> display-text;
+    in property <string> accessible-name;
+    callback changed(int);
+
+    width: Tokens.context-control-width;
+    height: Tokens.control-height;
+    border-width: 1px;
+    border-color: Tokens.control-rule;
+    border-radius: Tokens.radius-md;
+    background: Tokens.surface;
+
+    StepButton {
+        x: 1px;
+        y: 1px;
+        height: parent.height - 2px;
+        symbol: "−";
+        accessible-name: "减小" + root.accessible-name;
+        enabled: root.value > root.minimum;
+        clicked => {
+            root.value = max(root.minimum, min(root.maximum, root.value - root.step));
+            root.changed(root.value);
+        }
+    }
+    Text {
+        x: 36px;
+        width: parent.width - 72px;
+        height: parent.height;
+        text: root.display-text;
+        color: Tokens.ink;
+        font-size: Tokens.text-base;
+        font-weight: 700;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StepButton {
+        x: parent.width - self.width - 1px;
+        y: 1px;
+        height: parent.height - 2px;
+        symbol: "+";
+        accessible-name: "增大" + root.accessible-name;
+        enabled: root.value < root.maximum;
+        clicked => {
+            root.value = min(root.maximum, max(root.minimum, root.value + root.step));
+            root.changed(root.value);
+        }
+    }
+}
+
+component ReadOnlySwitch inherits Rectangle {
+    in property <bool> checked;
+    width: 36px;
+    height: 20px;
+    border-radius: 10px;
+    background: root.checked ? Tokens.accent : Tokens.rule;
+    accessible-role: checkbox;
+    accessible-label: root.checked ? "已启用" : "未启用";
+    accessible-checkable: true;
+    accessible-checked: root.checked;
+    accessible-enabled: false;
+
+    Rectangle {
+        x: root.checked ? parent.width - self.width - 2px : 2px;
+        y: 2px;
+        width: 16px;
+        height: 16px;
+        border-radius: 8px;
+        background: Tokens.surface;
+    }
+}
+
+component EntryCard inherits Rectangle {
+    in property <string> label;
+    in property <string> summary;
+    in property <string> action-text;
+    callback clicked;
+
+    height: 92px;
+    horizontal-stretch: 1;
+    border-width: 1px;
+    border-color: touch.has-hover ? Tokens.rule-strong : Tokens.rule;
+    border-radius: Tokens.radius-lg;
+    background: touch.pressed ? Tokens.surface-pressed
+        : touch.has-hover ? Tokens.surface-hover
+        : Tokens.surface;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.label + "，" + root.summary;
+    accessible-action-default => { root.clicked(); }
+
+    VerticalLayout {
+        padding: Tokens.space-sm;
+        spacing: 3px;
+        Text {
+            text: root.label;
+            color: Tokens.muted;
+            font-size: Tokens.text-sm;
+            font-weight: 500;
+            overflow: elide;
+        }
+        Text {
+            text: root.summary;
+            color: Tokens.ink;
+            font-size: Tokens.text-base;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            text: root.action-text;
+            color: Tokens.accent;
+            font-size: Tokens.text-sm;
+            font-weight: 500;
+            overflow: elide;
+        }
+    }
+    if focus.has-focus: Rectangle {
+        x: 2px;
+        y: 2px;
+        width: parent.width - 4px;
+        height: parent.height - 4px;
+        border-width: 2px;
+        border-color: Tokens.focus;
+        border-radius: Tokens.radius-md;
+        background: Tokens.transparent;
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+    focus := FocusScope {
+        x: 0px;
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}
+
+component MetricCard inherits Rectangle {
+    in property <string> label;
+    in property <string> value;
+    in property <string> delta;
+    in property <int> delta-tone;
+
+    min-width: 104px;
+    height: 82px;
+    horizontal-stretch: 1;
+    border-width: 1px;
+    border-color: Tokens.rule;
+    border-radius: Tokens.radius-lg;
+    background: Tokens.surface;
+
+    VerticalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        padding-top: 9px;
+        padding-bottom: 9px;
+        spacing: 2px;
+        Text {
+            text: root.label;
+            color: Tokens.muted;
+            font-size: Tokens.text-xs;
+            font-weight: 500;
+            overflow: elide;
+        }
+        Text {
+            text: root.value;
+            color: Tokens.ink;
+            font-size: Tokens.text-md;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            text: root.delta;
+            color: root.delta-tone < 0 ? Tokens.danger
+                : root.delta-tone > 0 ? Tokens.success
+                : Tokens.muted;
+            font-size: Tokens.text-xs;
+            font-weight: 500;
+            overflow: elide;
+        }
+    }
+}
+
+component UsagePeriodTotal inherits Rectangle {
+    in property <string> input;
+    in property <string> cached;
+    in property <string> output;
+    in property <string> calls;
+
+    height: 54px;
+    HorizontalLayout {
+        spacing: Tokens.space-sm;
+        VerticalLayout {
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: "输入";
+                color: Tokens.muted;
+                font-size: Tokens.text-xs;
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: root.input;
+                color: Tokens.ink-secondary;
+                font-size: Tokens.text-md;
+                font-weight: 600;
+                vertical-alignment: top;
+                overflow: elide;
+            }
+        }
+        Rectangle { width: 1px; background: Tokens.rule; }
+        VerticalLayout {
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: "缓存";
+                color: Tokens.muted;
+                font-size: Tokens.text-xs;
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: root.cached;
+                color: Tokens.ink-secondary;
+                font-size: Tokens.text-md;
+                font-weight: 600;
+                vertical-alignment: top;
+                overflow: elide;
+            }
+        }
+        Rectangle { width: 1px; background: Tokens.rule; }
+        VerticalLayout {
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: "输出";
+                color: Tokens.muted;
+                font-size: Tokens.text-xs;
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: root.output;
+                color: Tokens.ink-secondary;
+                font-size: Tokens.text-md;
+                font-weight: 600;
+                vertical-alignment: top;
+                overflow: elide;
+            }
+        }
+        Rectangle { width: 1px; background: Tokens.rule; }
+        VerticalLayout {
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                text: "调用";
+                color: Tokens.muted;
+                font-size: Tokens.text-xs;
+                vertical-alignment: bottom;
+            }
+            Text {
+                text: root.calls;
+                color: Tokens.ink-secondary;
+                font-size: Tokens.text-md;
+                font-weight: 600;
+                vertical-alignment: top;
+                overflow: elide;
+            }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Codex Switch";
     icon: @image-url("../assets/app-icon.svg");
     background: Tokens.paper;
     default-font-size: Tokens.text-base;
-    preferred-width: 720px;
-    preferred-height: 480px;
-    min-width: 660px;
-    min-height: 440px;
+    preferred-width: 840px;
+    preferred-height: 600px;
+    min-width: 720px;
+    min-height: 500px;
 
     in property <[ProfileRow]> profiles;
     in property <[string]> model-names;
@@ -694,6 +1228,49 @@ export component AppWindow inherits Window {
     in property <int> status-tone: 0;
     in property <bool> busy: false;
     in property <bool> can-restore: false;
+    in-out property <int> current-page: 0;
+    in-out property <string> context-window-k: "";
+    in-out property <int> compact-percent: 80;
+    in-out property <bool> context-dirty: false;
+    in-out property <bool> context-defaults-selected: true;
+    in property <float> context-history-ratio: 0;
+    in property <float> context-instruction-ratio: 0;
+    in property <float> context-remaining-ratio: 1;
+    in property <[InstructionRow]> instructions: [];
+    in property <string> context-summary: "自动窗口 · 输出不限 · 自动压缩";
+    in-out property <string> context-status: "上下文配置 · 已保存";
+    in-out property <int> context-status-tone: 0;
+    in-out property <bool> context-sync-error: false;
+    in property <string> today-usage-summary: "暂无本地记录";
+    in-out property <int> usage-period: 0;
+    in property <string> usage-day-label: "暂无日数据";
+    in property <string> usage-input: "0";
+    in property <string> usage-cached: "0";
+    in property <string> usage-output: "0";
+    in property <string> usage-calls: "0 次";
+    in property <string> usage-input-delta: "";
+    in property <string> usage-cached-delta: "";
+    in property <string> usage-output-delta: "";
+    in property <string> usage-calls-delta: "";
+    in property <int> usage-input-delta-tone: 0;
+    in property <int> usage-cached-delta-tone: 0;
+    in property <int> usage-output-delta-tone: 0;
+    in property <int> usage-calls-delta-tone: 0;
+    in property <string> usage-period-total-label: "";
+    in property <string> usage-period-models-label: "";
+    in property <string> usage-total-input: "0";
+    in property <string> usage-total-cached: "0";
+    in property <string> usage-total-output: "0";
+    in property <string> usage-total-calls: "0 次";
+    in property <string> usage-input-path: "";
+    in property <string> usage-output-path: "";
+    in property <[UsageTrendRow]> usage-trend-points: [];
+    in-out property <int> usage-trend-hover-index: -1;
+    in property <[UsageModelRow]> usage-models: [];
+    in property <bool> usage-loading: false;
+    in property <string> usage-status: "尚未读取本地数据";
+    in property <bool> usage-has-data: false;
+    in property <bool> usage-error: false;
     property <bool> selected-is-active: root.selected-index >= 0
         && root.selected-index < root.profiles.length
         && root.profiles[root.selected-index].is-active;
@@ -722,12 +1299,25 @@ export component AppWindow inherits Window {
     callback dialog-primary();
     callback dialog-secondary();
     callback dialog-tertiary();
+    callback save-context();
+    callback restore-context-defaults();
+    callback context-changed();
+    callback usage-period-selected(int);
+    callback refresh-usage();
+    callback export-usage();
+    callback usage-trend-hovered(float, int);
+
+    Timer {
+        interval: 900s;
+        running: true;
+        triggered => { root.refresh-usage(); }
+    }
 
     HorizontalLayout {
         spacing: 0px;
 
         sidebar := Rectangle {
-            min-width: 208px;
+            min-width: 220px;
             preferred-width: 220px;
             max-width: 220px;
             horizontal-stretch: 0;
@@ -803,6 +1393,14 @@ export component AppWindow inherits Window {
                         background: root.selected-index == index ? Tokens.sidebar-selected
                             : row-touch.has-hover ? Tokens.sidebar-hover
                             : Tokens.transparent;
+                        forward-focus: row-focus;
+                        accessible-role: button;
+                        accessible-label: profile.name + "，" + (profile.model == "" ? "未设置模型" : profile.model)
+                            + (profile.is-active ? "，使用中" : "");
+                        accessible-enabled: !root.busy;
+                        accessible-action-default => {
+                            if !root.busy { root.profile-selected(index); }
+                        }
 
                         if root.selected-index == index: Rectangle {
                             x: 0px;
@@ -817,10 +1415,32 @@ export component AppWindow inherits Window {
                             enabled: !root.busy;
                             clicked => { root.profile-selected(index); }
                         }
+                        row-focus := FocusScope {
+                            x: 0px;
+                            width: 0px;
+                            enabled: !root.busy;
+                            key-pressed(event) => {
+                                if event.text == " " || event.text == "\n" {
+                                    root.profile-selected(index);
+                                    return accept;
+                                }
+                                return reject;
+                            }
+                        }
+                        if row-focus.has-focus: Rectangle {
+                            x: 4px;
+                            y: 3px;
+                            width: parent.width - 8px;
+                            height: parent.height - 6px;
+                            border-width: 2px;
+                            border-color: Tokens.focus;
+                            border-radius: Tokens.radius-sm;
+                            background: Tokens.transparent;
+                        }
 
                         HorizontalLayout {
                             padding-left: Tokens.space-md;
-                            padding-right: Tokens.space-sm;
+                            padding-right: Tokens.space-md;
                             spacing: Tokens.space-xs;
                             VerticalLayout {
                                 spacing: 1px;
@@ -842,33 +1462,15 @@ export component AppWindow inherits Window {
                                     overflow: elide;
                                 }
                             }
-                            action-slot := Rectangle {
-                                width: 40px;
-                                vertical-stretch: 1;
-                                background: Tokens.transparent;
-
-                                if root.selected-index == index: IconButton {
-                                    x: (parent.width - self.width) / 2;
-                                    y: (parent.height - self.height) / 2;
-                                    width: Tokens.icon-button-size;
-                                    height: Tokens.icon-button-size;
-                                    on-dark: true;
-                                    danger: true;
-                                    enabled: !root.busy;
-                                    icon: @image-url("../assets/icons/trash.svg");
-                                    accessible-name: "删除中转站";
-                                    clicked => { root.delete-profile(); }
-                                }
-                                if root.selected-index != index: Text {
-                                    width: parent.width;
-                                    height: parent.height;
-                                    text: profile.is-active ? "使用中" : "";
-                                    color: Tokens.sidebar-success;
-                                    font-size: Tokens.text-sm;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                }
+                            Text {
+                                width: 48px;
+                                text: profile.is-active ? "使用中" : "";
+                                color: Tokens.sidebar-success;
+                                font-size: Tokens.text-sm;
+                                font-weight: 700;
+                                vertical-alignment: center;
+                                horizontal-alignment: right;
+                                overflow: elide;
                             }
                         }
                     }
@@ -918,7 +1520,7 @@ export component AppWindow inherits Window {
         }
 
         Rectangle {
-            min-width: 440px;
+            min-width: 500px;
             horizontal-stretch: 1;
             background: Tokens.paper;
 
@@ -933,7 +1535,7 @@ export component AppWindow inherits Window {
                     horizontal-alignment: center;
                 }
                 Text {
-                    text: root.profiles.length == 0 ? "填写连接信息后保存" : "查看当前连接和模型";
+                    text: root.profiles.length == 0 ? "填写连接信息后保存" : "查看当前连接、上下文和用量";
                     color: Tokens.muted;
                     font-size: Tokens.text-sm;
                     horizontal-alignment: center;
@@ -983,83 +1585,857 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
+
+                Rectangle {
+                    height: 40px;
+                    background: Tokens.surface;
+                    HorizontalLayout {
+                        padding-left: Tokens.space-lg;
+                        spacing: 2px;
+                        NavTab {
+                            text: "中转站";
+                            selected: root.current-page == 0;
+                            clicked => { root.current-page = 0; }
+                        }
+                        NavTab {
+                            text: "上下文";
+                            selected: root.current-page == 1;
+                            clicked => { root.current-page = 1; }
+                        }
+                        NavTab {
+                            text: "统计";
+                            selected: root.current-page == 2;
+                            clicked => { root.current-page = 2; }
+                        }
+                        Rectangle { horizontal-stretch: 1; background: Tokens.transparent; }
+                    }
+                }
                 Rectangle { height: 1px; background: Tokens.rule; }
 
-                VerticalLayout {
-                    padding-left: Tokens.space-lg;
-                    padding-right: Tokens.space-lg;
-                    padding-top: Tokens.space-md;
-                    padding-bottom: Tokens.space-md;
-                    spacing: 0px;
+                Rectangle {
                     vertical-stretch: 1;
+                    background: Tokens.paper;
 
-                    SectionLabel { label: "连接"; }
-                    Rectangle { height: 1px; background: Tokens.rule; }
-                    SummaryRow { label: "接口地址"; value: root.draft-base-url; }
-                    SummaryRow { label: "API Key"; value: root.draft-api-key == "" ? "未配置" : "已配置"; }
+                    if root.current-page == 0: relay-scroll := ScrollView {
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
 
-                    Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
-                    SectionLabel { label: "模型"; }
-                    Rectangle { height: 1px; background: Tokens.rule; }
-                    SummaryRow { label: "默认模型"; value: root.draft-model == "" ? "未设置" : root.draft-model; }
-                    SummaryRow {
-                        label: "审查模型";
-                        value: root.advanced-open && root.draft-review-model != ""
-                            ? root.draft-review-model : "跟随默认模型";
+                        VerticalLayout {
+                            width: relay-scroll.visible-width - 48px;
+                            x: 24px;
+                            padding-top: Tokens.space-md;
+                            padding-bottom: Tokens.space-md;
+                            spacing: 0px;
+
+                            SectionLabel { label: "连接"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            SummaryRow {
+                                label: "接口地址";
+                                value: root.draft-base-url == "" ? "未设置" : root.draft-base-url;
+                            }
+                            SummaryRow {
+                                label: "API Key";
+                                value: root.draft-api-key == "" ? "未配置" : "已配置";
+                            }
+
+                            Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                            SectionLabel { label: "模型"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            SummaryRow {
+                                label: "默认模型";
+                                value: root.draft-model == "" ? "未设置" : root.draft-model;
+                            }
+                            SummaryRow {
+                                label: "审查模型";
+                                value: root.advanced-open && root.draft-review-model != ""
+                                    ? root.draft-review-model : "跟随默认模型";
+                            }
+                            SummaryRow {
+                                label: "模型列表";
+                                value: root.model-cache-label == "" ? "尚未获取模型列表" : root.model-cache-label;
+                            }
+
+                            Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                            HorizontalLayout {
+                                height: 92px;
+                                spacing: Tokens.space-sm;
+                                EntryCard {
+                                    label: "上下文";
+                                    summary: root.context-summary;
+                                    action-text: "在「上下文」标签页调整 →";
+                                    clicked => { root.current-page = 1; }
+                                }
+                                EntryCard {
+                                    label: "今日用量";
+                                    summary: root.today-usage-summary;
+                                    action-text: "查看统计明细 →";
+                                    clicked => { root.current-page = 2; }
+                                }
+                            }
+                        }
                     }
-                    SummaryRow { label: "模型列表"; value: root.model-cache-label; }
 
-                    Rectangle { vertical-stretch: 1; background: Tokens.transparent; }
+                    if root.current-page == 1: context-scroll := ScrollView {
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                        VerticalLayout {
+                            width: context-scroll.visible-width - 48px;
+                            x: 24px;
+                            padding-top: Tokens.space-md;
+                            padding-bottom: Tokens.space-md;
+                            spacing: 0px;
+
+                            SectionLabel { label: "窗口与输出"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle {
+                                height: Tokens.field-row-height;
+                                HorizontalLayout {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    spacing: Tokens.space-md;
+                                    Text {
+                                        text: "上下文窗口";
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-base;
+                                        font-weight: 500;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: Tokens.context-control-width;
+                                        height: parent.height;
+                                        background: Tokens.transparent;
+                                        UnitNumberField {
+                                            width: parent.width;
+                                            x: 0px;
+                                            y: (parent.height - self.height) / 2;
+                                            text <=> root.context-window-k;
+                                            placeholder-text: "自动";
+                                            unit: "K";
+                                            accessible-name: "上下文窗口（K）";
+                                            enabled: !root.busy;
+                                            edited(value) => {
+                                                root.context-window-k = value;
+                                                root.context-defaults-selected = false;
+                                                root.context-dirty = true;
+                                                root.context-status = "上下文配置 · 有未保存修改";
+                                                root.context-status-tone = 2;
+                                                root.context-sync-error = false;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle {
+                                height: Tokens.field-row-height;
+                                HorizontalLayout {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    spacing: Tokens.space-md;
+                                    Text {
+                                        text: "输出限制";
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-base;
+                                        font-weight: 500;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: Tokens.context-control-width;
+                                        height: parent.height;
+                                        background: Tokens.transparent;
+                                        Rectangle {
+                                            width: parent.width;
+                                            height: Tokens.control-height;
+                                            x: 0px;
+                                            y: (parent.height - self.height) / 2;
+                                            border-width: 1px;
+                                            border-color: Tokens.control-rule;
+                                            border-radius: Tokens.radius-md;
+                                            background: Tokens.surface;
+                                            Text {
+                                                text: "不限";
+                                                color: Tokens.ink;
+                                                font-size: Tokens.text-base;
+                                                font-weight: 700;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle {
+                                height: Tokens.field-row-height;
+                                HorizontalLayout {
+                                    width: parent.width;
+                                    height: parent.height;
+                                    spacing: Tokens.space-md;
+                                    Text {
+                                        text: "自动压缩阈值";
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-base;
+                                        font-weight: 500;
+                                        horizontal-alignment: left;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Rectangle {
+                                        width: Tokens.context-control-width;
+                                        height: parent.height;
+                                        background: Tokens.transparent;
+                                        ValueStepper {
+                                            width: parent.width;
+                                            x: 0px;
+                                            y: (parent.height - self.height) / 2;
+                                            value <=> root.compact-percent;
+                                            minimum: 50;
+                                            maximum: 95;
+                                            step: 5;
+                                            display-text: root.context-defaults-selected ? "自动" : root.compact-percent + "%";
+                                            accessible-name: "自动压缩阈值";
+                                            changed(value) => {
+                                                root.context-defaults-selected = false;
+                                                root.context-dirty = true;
+                                                root.context-status = "上下文配置 · 有未保存修改";
+                                                root.context-status-tone = 2;
+                                                root.context-sync-error = false;
+                                                root.context-changed();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                            SectionLabel { label: "上下文预算 · 最近会话估算"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle { height: Tokens.space-sm; background: Tokens.transparent; }
+                            budget := Rectangle {
+                                height: 10px;
+                                border-radius: 5px;
+                                background: Tokens.rule;
+                                clip: true;
+                                Rectangle {
+                                    x: 0px;
+                                    width: parent.width * clamp(root.context-history-ratio, 0, 1);
+                                    height: parent.height;
+                                    background: Tokens.accent;
+                                }
+                                Rectangle {
+                                    x: parent.width * clamp(root.context-history-ratio, 0, 1);
+                                    width: parent.width * clamp(root.context-instruction-ratio, 0, 1);
+                                    height: parent.height;
+                                    background: Tokens.ink-secondary;
+                                }
+                                Rectangle {
+                                    x: parent.width * clamp(root.context-history-ratio + root.context-instruction-ratio, 0, 1);
+                                    width: parent.width * clamp(root.context-remaining-ratio, 0, 1);
+                                    height: parent.height;
+                                    background: Tokens.rule;
+                                }
+                            }
+                            Rectangle { height: Tokens.space-xs; background: Tokens.transparent; }
+                            HorizontalLayout {
+                                height: 22px;
+                                spacing: Tokens.space-md;
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    horizontal-stretch: 1;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 2px;
+                                        background: Tokens.accent;
+                                    }
+                                    Text {
+                                        text: "其他输入 " + round(root.context-history-ratio * 100) + "%";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    horizontal-stretch: 1;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 2px;
+                                        background: Tokens.ink-secondary;
+                                    }
+                                    Text {
+                                        text: "指令文件 " + round(root.context-instruction-ratio * 100) + "%";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 6px;
+                                    horizontal-stretch: 1;
+                                    Rectangle {
+                                        width: 8px;
+                                        height: 8px;
+                                        border-radius: 2px;
+                                        background: Tokens.rule;
+                                    }
+                                    Text {
+                                        text: "剩余 " + round(root.context-remaining-ratio * 100) + "%";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: Tokens.space-sm; background: Tokens.transparent; }
+                            SectionLabel { label: "指令文件"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            if root.instructions.length == 0: Rectangle {
+                                height: 52px;
+                                Text {
+                                    text: "未发现指令文件";
+                                    color: Tokens.muted;
+                                    font-size: Tokens.text-sm;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            for instruction in root.instructions: Rectangle {
+                                height: 52px;
+                                Rectangle {
+                                    y: parent.height - 1px;
+                                    height: 1px;
+                                    width: parent.width;
+                                    background: Tokens.rule;
+                                }
+                                HorizontalLayout {
+                                    spacing: Tokens.space-md;
+                                    VerticalLayout {
+                                        spacing: 1px;
+                                        alignment: center;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: instruction.name;
+                                            color: Tokens.ink;
+                                            font-size: Tokens.text-base;
+                                            font-weight: 600;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: instruction.detail;
+                                            color: Tokens.muted;
+                                            font-size: Tokens.text-xs;
+                                            overflow: elide;
+                                        }
+                                    }
+                                    ReadOnlySwitch { checked: instruction.enabled; }
+                                }
+                            }
+                        }
+                    }
+
+                    if root.current-page == 2: stats-scroll := ScrollView {
+                        horizontal-scrollbar-policy: ScrollBarPolicy.always-off;
+
+                        if root.usage-loading: Rectangle {
+                            width: stats-scroll.visible-width;
+                            height: stats-scroll.visible-height;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: Tokens.space-sm;
+                                Spinner {
+                                    width: 22px;
+                                    height: 22px;
+                                }
+                                Text {
+                                    text: "正在加载用量数据";
+                                    color: Tokens.muted;
+                                    font-size: Tokens.text-sm;
+                                    horizontal-alignment: center;
+                                }
+                            }
+                        }
+
+                        if !root.usage-loading && root.usage-error: Rectangle {
+                            width: stats-scroll.visible-width;
+                            height: stats-scroll.visible-height;
+                            VerticalLayout {
+                                padding-left: Tokens.space-lg;
+                                padding-right: Tokens.space-lg;
+                                alignment: center;
+                                spacing: Tokens.space-xs;
+                                Text {
+                                    text: "用量数据暂时不可用";
+                                    color: Tokens.ink;
+                                    font-size: Tokens.text-md;
+                                    font-weight: 700;
+                                    horizontal-alignment: center;
+                                }
+                                Text {
+                                    text: root.usage-status;
+                                    color: Tokens.danger;
+                                    font-size: Tokens.text-sm;
+                                    horizontal-alignment: center;
+                                    wrap: word-wrap;
+                                }
+                            }
+                        }
+
+                        if !root.usage-loading && !root.usage-error: VerticalLayout {
+                            width: stats-scroll.visible-width - 48px;
+                            x: 24px;
+                            padding-top: Tokens.space-md;
+                            padding-bottom: Tokens.space-md;
+                            spacing: 0px;
+
+                            HorizontalLayout {
+                                height: 34px;
+                                spacing: Tokens.space-md;
+                                Text {
+                                    text: "单日用量 · " + root.usage-day-label;
+                                    color: Tokens.ink;
+                                    font-size: Tokens.text-sm;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                    horizontal-stretch: 1;
+                                    overflow: elide;
+                                }
+                                Rectangle {
+                                    width: 286px;
+                                    height: 32px;
+                                    border-width: 1px;
+                                    border-color: Tokens.rule;
+                                    border-radius: Tokens.radius-md;
+                                    background: Tokens.surface;
+                                    HorizontalLayout {
+                                        padding: 2px;
+                                        spacing: 2px;
+                                        SegmentButton {
+                                            text: "今日";
+                                            selected: root.usage-period == 0;
+                                            clicked => {
+                                                root.usage-period = 0;
+                                                root.usage-period-selected(0);
+                                            }
+                                        }
+                                        SegmentButton {
+                                            text: "近 7 天";
+                                            selected: root.usage-period == 1;
+                                            clicked => {
+                                                root.usage-period = 1;
+                                                root.usage-period-selected(1);
+                                            }
+                                        }
+                                        SegmentButton {
+                                            text: "近 30 天";
+                                            selected: root.usage-period == 2;
+                                            clicked => {
+                                                root.usage-period = 2;
+                                                root.usage-period-selected(2);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle { height: Tokens.space-sm; background: Tokens.transparent; }
+                            HorizontalLayout {
+                                height: 82px;
+                                spacing: Tokens.space-xs;
+                                MetricCard {
+                                    label: "输入 Tokens";
+                                    value: root.usage-input;
+                                    delta: root.usage-input-delta;
+                                    delta-tone: root.usage-input-delta-tone;
+                                }
+                                MetricCard {
+                                    label: "缓存输入";
+                                    value: root.usage-cached;
+                                    delta: root.usage-cached-delta;
+                                    delta-tone: root.usage-cached-delta-tone;
+                                }
+                                MetricCard {
+                                    label: "输出 Tokens";
+                                    value: root.usage-output;
+                                    delta: root.usage-output-delta;
+                                    delta-tone: root.usage-output-delta-tone;
+                                }
+                                MetricCard {
+                                    label: "API 调用";
+                                    value: root.usage-calls;
+                                    delta: root.usage-calls-delta;
+                                    delta-tone: root.usage-calls-delta-tone;
+                                }
+                            }
+
+                            Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                            SectionLabel { label: "每日用量趋势 · 近 14 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放"; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle { height: Tokens.space-sm; background: Tokens.transparent; }
+                            chart := Rectangle {
+                                height: 116px;
+                                background: Tokens.transparent;
+                                property <length> hover-x: root.usage-trend-points.length <= 1
+                                    ? 0px
+                                    : root.usage-trend-hover-index * (self.width - 1px)
+                                        / (root.usage-trend-points.length - 1);
+                                Rectangle {
+                                    y: parent.height * 0.25;
+                                    width: parent.width;
+                                    height: 1px;
+                                    background: Tokens.rule;
+                                }
+                                Rectangle {
+                                    y: parent.height * 0.5;
+                                    width: parent.width;
+                                    height: 1px;
+                                    background: Tokens.rule;
+                                }
+                                Rectangle {
+                                    y: parent.height * 0.75;
+                                    width: parent.width;
+                                    height: 1px;
+                                    background: Tokens.rule;
+                                }
+                                Rectangle {
+                                    y: parent.height - 1px;
+                                    width: parent.width;
+                                    height: 1px;
+                                    background: Tokens.rule-strong;
+                                }
+                                Path {
+                                    width: parent.width;
+                                    height: parent.height - 1px;
+                                    viewbox-width: 1000;
+                                    viewbox-height: 1000;
+                                    fit: fill;
+                                    clip: true;
+                                    commands: root.usage-input-path;
+                                    stroke: Tokens.accent;
+                                    stroke-width: 2px;
+                                    stroke-line-cap: round;
+                                    stroke-line-join: round;
+                                }
+                                Path {
+                                    width: parent.width;
+                                    height: parent.height - 1px;
+                                    viewbox-width: 1000;
+                                    viewbox-height: 1000;
+                                    fit: fill;
+                                    clip: true;
+                                    commands: root.usage-output-path;
+                                    stroke: Tokens.ink-secondary;
+                                    stroke-width: 2px;
+                                    stroke-line-cap: round;
+                                    stroke-line-join: round;
+                                }
+                                if chart-touch.has-hover
+                                    && root.usage-trend-hover-index >= 0
+                                    && root.usage-trend-hover-index < root.usage-trend-points.length: Rectangle {
+                                    x: max(0px, chart.hover-x - 0.5px);
+                                    y: 0px;
+                                    width: 1px;
+                                    height: parent.height;
+                                    background: Tokens.rule-strong;
+                                }
+                                if chart-touch.has-hover
+                                    && root.usage-trend-hover-index >= 0
+                                    && root.usage-trend-hover-index < root.usage-trend-points.length: Rectangle {
+                                    width: min(252px, parent.width - 12px);
+                                    height: 58px;
+                                    x: min(
+                                        max(6px, chart.hover-x - self.width / 2),
+                                        parent.width - self.width - 6px,
+                                    );
+                                    y: 7px;
+                                    border-radius: Tokens.radius-sm;
+                                    border-width: 1px;
+                                    border-color: Tokens.rule-strong;
+                                    background: Tokens.ink;
+
+                                    VerticalLayout {
+                                        padding-left: Tokens.space-xs;
+                                        padding-right: Tokens.space-xs;
+                                        padding-top: 5px;
+                                        padding-bottom: 5px;
+                                        spacing: 1px;
+                                        Text {
+                                            text: root.usage-trend-points[root.usage-trend-hover-index].date + " · 单日用量";
+                                            color: Tokens.accent-ink;
+                                            font-size: Tokens.text-xs;
+                                            font-weight: 600;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: "输入 " + root.usage-trend-points[root.usage-trend-hover-index].input
+                                                + " · 缓存 " + root.usage-trend-points[root.usage-trend-hover-index].cached;
+                                            color: Tokens.accent-ink;
+                                            font-size: Tokens.text-xs;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: "输出 " + root.usage-trend-points[root.usage-trend-hover-index].output
+                                                + " · 调用 " + root.usage-trend-points[root.usage-trend-hover-index].calls;
+                                            color: Tokens.accent-ink;
+                                            font-size: Tokens.text-xs;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                        }
+                                    }
+                                }
+                                chart-touch := TouchArea {
+                                    mouse-cursor: crosshair;
+                                    pointer-event(event) => {
+                                        if event.kind == PointerEventKind.move && parent.width > 0px {
+                                            root.usage-trend-hovered(
+                                                self.mouse-x / parent.width,
+                                                root.usage-trend-points.length,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.usage-period != 0: Rectangle {
+                                height: Tokens.space-md;
+                                background: Tokens.transparent;
+                            }
+                            if root.usage-period != 0: SectionLabel {
+                                label: root.usage-period-total-label;
+                            }
+                            if root.usage-period != 0: Rectangle {
+                                height: 1px;
+                                background: Tokens.rule;
+                            }
+                            if root.usage-period != 0: UsagePeriodTotal {
+                                input: root.usage-total-input;
+                                cached: root.usage-total-cached;
+                                output: root.usage-total-output;
+                                calls: root.usage-total-calls;
+                            }
+
+                            Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
+                            SectionLabel { label: root.usage-period-models-label; }
+                            Rectangle { height: 1px; background: Tokens.rule; }
+                            Rectangle {
+                                height: 26px;
+                                HorizontalLayout {
+                                    spacing: Tokens.space-xs;
+                                    Text {
+                                        text: "模型";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: "输入";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: "缓存";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: "输出";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                    Text {
+                                        width: 48px;
+                                        text: "调用";
+                                        color: Tokens.muted;
+                                        font-size: Tokens.text-xs;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                            if root.usage-models.length == 0: Rectangle {
+                                height: 48px;
+                                Text {
+                                    text: "暂无模型明细";
+                                    color: Tokens.muted;
+                                    font-size: Tokens.text-sm;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            for row in root.usage-models: Rectangle {
+                                height: 30px;
+                                Rectangle {
+                                    y: parent.height - 1px;
+                                    height: 1px;
+                                    width: parent.width;
+                                    background: Tokens.rule;
+                                }
+                                HorizontalLayout {
+                                    spacing: Tokens.space-xs;
+                                    Text {
+                                        text: row.model;
+                                        color: Tokens.ink;
+                                        font-size: Tokens.text-sm;
+                                        font-weight: 600;
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: row.input;
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-sm;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: row.cached;
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-sm;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 64px;
+                                        text: row.output;
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-sm;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        width: 48px;
+                                        text: row.calls;
+                                        color: Tokens.ink-secondary;
+                                        font-size: Tokens.text-sm;
+                                        horizontal-alignment: right;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+
+                        }
+                    }
                 }
 
                 Rectangle {
                     height: Tokens.toolbar-height;
                     background: Tokens.surface;
-                    Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        width: parent.width;
+                        background: Tokens.rule;
+                    }
                     HorizontalLayout {
                         padding-left: Tokens.space-lg;
                         padding-right: Tokens.space-md;
                         padding-top: Tokens.space-xs;
                         padding-bottom: Tokens.space-xs;
                         spacing: Tokens.space-xs;
-                        if root.busy || root.status-tone >= 2: Rectangle {
+
+                        if root.busy || root.usage-loading: Spinner {
                             width: 18px;
+                            height: 18px;
+                        }
+                        if !root.busy && !root.usage-loading: StatusDot {
                             height: Tokens.control-height;
-                            background: Tokens.transparent;
-                            if root.busy: Spinner {
-                                y: (parent.height - self.height) / 2;
-                                width: 18px;
-                                height: 18px;
-                            }
-                            if !root.busy: StatusDot {
-                                x: 5px;
-                                height: parent.height;
-                                dot-color: root.status-tone == 3 ? Tokens.danger : Tokens.warning;
-                            }
+                            dot-color: root.current-page == 1 && root.context-status-tone == 3 ? Tokens.danger
+                                : root.current-page == 1 && root.context-dirty ? Tokens.warning
+                                : root.current-page == 2 && root.usage-error ? Tokens.danger
+                                : Tokens.rule-strong;
                         }
                         Text {
-                            text: root.busy || root.status-tone >= 2 ? root.status-text : "";
-                            color: root.status-tone == 3 ? Tokens.danger : Tokens.ink-secondary;
+                            text: root.current-page == 0
+                                ? (root.status-text == "" ? "就绪" : root.status-text)
+                                : root.current-page == 1
+                                    ? (root.context-status-tone == 3 ? root.context-status
+                                        : root.context-dirty ? "上下文配置 · 有未保存修改"
+                                        : root.context-status)
+                                    : root.usage-loading ? "正在加载用量数据"
+                                        : root.usage-status == "" ? "暂无用量数据" : root.usage-status;
+                            color: root.current-page == 0 && root.status-tone == 3 ? Tokens.danger
+                                : root.current-page == 1 && root.context-status-tone == 3 ? Tokens.danger
+                                : root.current-page == 1 && root.context-status-tone == 2 ? Tokens.warning
+                                : root.current-page == 2 && root.usage-error ? Tokens.danger
+                                : Tokens.ink-secondary;
                             font-size: Tokens.text-sm;
                             horizontal-alignment: left;
                             vertical-alignment: center;
                             overflow: elide;
                             horizontal-stretch: 1;
                         }
-                        CommandButton {
+
+                        if root.current-page == 0: CommandButton {
                             text: "编辑配置";
                             button-width: 84px;
                             enabled: !root.busy;
                             clicked => { root.editor-open = true; }
                         }
-                        CommandButton {
-                            text: root.busy ? "正在切换"
-                                : root.selected-is-active ? "重新切换"
+                        if root.current-page == 0: CommandButton {
+                            text: root.busy ? (root.selected-is-active ? "正在重新应用" : "正在切换")
+                                : root.selected-is-active ? "重新应用配置"
                                 : "切换到此中转站";
                             button-width: 120px;
                             primary: true;
                             enabled: !root.busy;
                             clicked => { root.apply-profile(); }
+                        }
+                        if root.current-page == 1: CommandButton {
+                            text: "恢复默认";
+                            button-width: 84px;
+                            enabled: !root.busy;
+                            clicked => { root.restore-context-defaults(); }
+                        }
+                        if root.current-page == 1: CommandButton {
+                            text: root.context-sync-error && !root.context-dirty ? "重试同步" : "保存到配置";
+                            button-width: 104px;
+                            primary: true;
+                            enabled: (root.context-dirty || root.context-sync-error) && !root.busy;
+                            clicked => { root.save-context(); }
+                        }
+                        if root.current-page == 2: CommandButton {
+                            text: "导出 CSV";
+                            button-width: 84px;
+                            enabled: root.usage-has-data && !root.usage-loading && !root.busy;
+                            clicked => { root.export-usage(); }
+                        }
+                        if root.current-page == 2: CommandButton {
+                            text: root.usage-loading ? "正在刷新" : "刷新数据";
+                            button-width: 92px;
+                            primary: true;
+                            enabled: !root.usage-loading && !root.busy;
+                            clicked => { root.refresh-usage(); }
                         }
                     }
                 }
@@ -1085,6 +2461,8 @@ export component AppWindow inherits Window {
             border-color: Tokens.rule-strong;
             border-radius: Tokens.radius-lg;
             clip: true;
+            accessible-role: groupbox;
+            accessible-label: "编辑中转站";
 
             VerticalLayout {
                 spacing: 0px;
@@ -1265,7 +2643,12 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: Tokens.toolbar-height;
                     background: Tokens.surface;
-                    Rectangle { height: 1px; width: parent.width; background: Tokens.rule; }
+                    Rectangle {
+                        y: 0px;
+                        height: 1px;
+                        width: parent.width;
+                        background: Tokens.rule;
+                    }
                     HorizontalLayout {
                         padding-left: Tokens.space-md;
                         padding-right: Tokens.space-md;
@@ -1316,6 +2699,8 @@ export component AppWindow inherits Window {
             border-width: 1px;
             border-color: Tokens.rule-strong;
             border-radius: Tokens.radius-lg;
+            accessible-role: groupbox;
+            accessible-label: root.dialog-title;
             VerticalLayout {
                 padding: Tokens.space-lg;
                 spacing: Tokens.space-md;
@@ -1377,6 +2762,8 @@ export component AppWindow inherits Window {
             border-width: 1px;
             border-color: Tokens.rule-strong;
             border-radius: Tokens.radius-lg;
+            accessible-role: groupbox;
+            accessible-label: "关于 Codex Switch";
             VerticalLayout {
                 padding: Tokens.space-lg;
                 spacing: Tokens.space-sm;

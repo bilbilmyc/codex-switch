@@ -9,9 +9,11 @@ repository = "https://github.com/bilbilmyc/codex-switch"
 build = "build.rs"
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std", "serde"] }
 directories = "6"
 reqwest = { version = "0.13", default-features = false, features = ["blocking", "native-tls", "system-proxy"] }
 rfd = "0.15"
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"

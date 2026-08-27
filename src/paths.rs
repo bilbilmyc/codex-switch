@@ -17,6 +17,8 @@ pub struct AppPaths {
     pub codex_dir: PathBuf,
     pub codex_config: PathBuf,
     pub codex_auth: PathBuf,
+    pub codex_sessions: PathBuf,
+    pub codex_archived_sessions: PathBuf,
     pub tool_dir: PathBuf,
     pub profiles: PathBuf,
     pub state: PathBuf,
@@ -25,6 +27,7 @@ pub struct AppPaths {
     pub instance_lock: PathBuf,
     pub lock: PathBuf,
     pub model_cache_dir: PathBuf,
+    pub usage_database: PathBuf,
     pub backups_dir: PathBuf,
 }
 
@@ -42,12 +45,15 @@ impl AppPaths {
         Self {
             codex_config: codex_dir.join("config.toml"),
             codex_auth: codex_dir.join("auth.json"),
+            codex_sessions: codex_dir.join("sessions"),
+            codex_archived_sessions: codex_dir.join("archived_sessions"),
             profiles: tool_dir.join("profiles.toml"),
             state: tool_dir.join("state.json"),
             journal: tool_dir.join("transaction.json"),
             instance_lock: tool_dir.join(".instance.lock"),
             lock: tool_dir.join(".lock"),
             model_cache_dir: tool_dir.join("model-cache"),
+            usage_database: tool_dir.join("usage.sqlite3"),
             backups_dir: tool_dir.join("backups"),
             home_dir,
             codex_dir,
@@ -101,7 +107,16 @@ mod tests {
 
         assert_eq!(paths.codex_config, home.join(".codex/config.toml"));
         assert_eq!(paths.codex_auth, home.join(".codex/auth.json"));
+        assert_eq!(paths.codex_sessions, home.join(".codex/sessions"));
+        assert_eq!(
+            paths.codex_archived_sessions,
+            home.join(".codex/archived_sessions")
+        );
         assert_eq!(paths.profiles, home.join(".codex-switch/profiles.toml"));
+        assert_eq!(
+            paths.usage_database,
+            home.join(".codex-switch/usage.sqlite3")
+        );
         assert_eq!(
             paths.instance_lock,
             home.join(".codex-switch/.instance.lock")

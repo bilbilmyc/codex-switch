@@ -5,3 +5,5 @@
 /ui/ui-prototype.html
 *.swp
 .DS_Store
+.workbuddy/
+prototype/

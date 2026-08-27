@@ -195,6 +195,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_profiles_without_context_remain_unmanaged() {
+        let id = ProfileId::new();
+        let legacy = format!(
+            r#"schema_version = 1
+
+[[profiles]]
+id = "{id}"
+name = "Legacy"
+base_url = "https://relay.example/v1"
+api_key = "sk-legacy"
+model = "gpt-5"
+"#
+        );
+
+        let document = ProfileStore::deserialize(legacy.as_bytes()).unwrap();
+
+        assert_eq!(document.profiles[0].context, None);
+        assert!(document.profiles[0].activation().unwrap().context.is_none());
+    }
+
+    #[test]
     fn rejects_unknown_schema_and_duplicate_names() {
         let mut document = ProfilesDocument {
             schema_version: 99,

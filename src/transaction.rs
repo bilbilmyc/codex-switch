@@ -11,11 +11,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::codex_config::{
-    CodexConfigError, RelevantProjection, patch_auth_json, patch_codex_config,
+    CodexConfigError, ContextSettings, RelevantProjection, TOOL_PROVIDER_ID, inspect_codex_config,
+    patch_auth_json, patch_codex_config, patch_context_settings, pre_context_relevant_fingerprint,
     relevant_fingerprint, relevant_projection,
 };
 use crate::domain::{Activation, ProfileId};
 use crate::durable_fs::{self, DurableFsError};
+use crate::legacy_usage::{LegacyUsageHistory, LegacyUsageObservation};
 use crate::paths::AppPaths;
 
 const TRANSACTION_SCHEMA_VERSION: u32 = 1;
@@ -176,7 +178,7 @@ impl TransactionManager {
 
         if policy == ConflictPolicy::Reject
             && let Some(state) = self.load_state_locked()?
-            && state.relevant_fingerprint != actual_fingerprint
+            && !state_fingerprint_matches(&state, &actual_fingerprint, &actual_projection)?
         {
             return Err(TransactionError::ExternalConflict(Box::new(
                 ExternalConflict {
@@ -219,6 +221,59 @@ impl TransactionManager {
         Ok(ApplyOutcome { backup, state })
     }
 
+    pub fn update_context(
+        &self,
+        settings: ContextSettings,
+    ) -> Result<BackupSummary, TransactionError> {
+        self.update_context_validated(settings, None)
+    }
+
+    pub fn update_context_validated(
+        &self,
+        settings: ContextSettings,
+        validator: Option<&dyn StagedValidator>,
+    ) -> Result<BackupSummary, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+
+        let current = self.read_live_snapshot()?;
+        let current_config = config_text(&self.paths.codex_config, current.config.as_deref())?;
+        let actual_projection = relevant_projection(current_config, current.auth.as_deref())?;
+        let actual_fingerprint = relevant_fingerprint(current_config, current.auth.as_deref())?;
+        let current_state = deserialize_state(current.state.as_deref())?;
+        if let Some(state) = &current_state
+            && !state_fingerprint_matches(state, &actual_fingerprint, &actual_projection)?
+        {
+            return Err(TransactionError::ExternalConflict(Box::new(
+                ExternalConflict {
+                    expected_fingerprint: state.relevant_fingerprint.clone(),
+                    actual_fingerprint,
+                    actual_projection,
+                },
+            )));
+        }
+
+        let patched_config = patch_context_settings(current_config, settings)?;
+        if let (Some(validator), Some(auth)) = (validator, current.auth.as_deref()) {
+            validator
+                .validate(&patched_config, auth)
+                .map_err(TransactionError::StagedValidation)?;
+        }
+        let target_state = current_state
+            .map(|mut state| {
+                state.relevant_fingerprint =
+                    relevant_fingerprint(&patched_config, current.auth.as_deref())?;
+                serialize_json(&state)
+            })
+            .transpose()?;
+        let target = Snapshot {
+            config: Some(patched_config.into_bytes()),
+            auth: current.auth.clone(),
+            state: target_state,
+        };
+        self.commit_snapshot(TransactionOperation::UpdateContext, &current, &target)
+    }
+
     pub fn has_backup(&self) -> Result<bool, TransactionError> {
         let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
         self.recover_locked()?;
@@ -229,6 +284,43 @@ impl TransactionManager {
         let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
         self.recover_locked()?;
         self.list_backups_locked()
+    }
+
+    /// Returns only the validated, non-sensitive information needed to recover ownership of
+    /// usage written before profiles received independent provider IDs.
+    pub fn legacy_usage_history(&self) -> Result<LegacyUsageHistory, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+
+        let mut summaries = self.list_backups_locked()?;
+        summaries.sort_by(|left, right| {
+            left.created_at_unix_ms
+                .cmp(&right.created_at_unix_ms)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+        let mut backups = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            let snapshot = self.read_backup(summary.id)?;
+            let legacy_profile_id = self.legacy_profile_id_for_snapshot(
+                &self.backup_dir(summary.id).join(BACKUP_CONFIG_FILE),
+                &snapshot,
+            )?;
+            backups.push(LegacyUsageObservation {
+                captured_at_unix_ms: summary.created_at_unix_ms,
+                legacy_profile_id,
+            });
+        }
+
+        let live = self.read_live_snapshot()?;
+        let legacy_profile_id =
+            self.legacy_profile_id_for_snapshot(&self.paths.codex_config, &live)?;
+        Ok(LegacyUsageHistory {
+            backups,
+            live: LegacyUsageObservation {
+                captured_at_unix_ms: unix_time_ms()?,
+                legacy_profile_id,
+            },
+        })
     }
 
     pub fn restore_latest(&self) -> Result<RestoreOutcome, TransactionError> {
@@ -242,11 +334,18 @@ impl TransactionManager {
             .ok_or(TransactionError::NoBackup)?;
         let source = self.read_backup(restored.id)?;
         let source_config = config_text(&self.paths.codex_config, source.config.as_deref())?;
+        let source_projection = relevant_projection(source_config, source.auth.as_deref())?;
         let fingerprint = relevant_fingerprint(source_config, source.auth.as_deref())?;
         let source_state = deserialize_state(source.state.as_deref())?;
-        let active_profile_id = source_state
-            .filter(|state| state.relevant_fingerprint == fingerprint)
-            .and_then(|state| state.active_profile_id);
+        let active_profile_id = if let Some(state) = source_state {
+            if state_fingerprint_matches(&state, &fingerprint, &source_projection)? {
+                state.active_profile_id
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let state = ManagedState {
             schema_version: STATE_SCHEMA_VERSION,
             active_profile_id,
@@ -373,6 +472,25 @@ impl TransactionManager {
             auth: durable_fs::read_optional(&self.paths.codex_auth)?,
             state: durable_fs::read_optional(&self.paths.state)?,
         })
+    }
+
+    fn legacy_profile_id_for_snapshot(
+        &self,
+        config_path: &Path,
+        snapshot: &Snapshot,
+    ) -> Result<Option<ProfileId>, TransactionError> {
+        let raw_config = config_text(config_path, snapshot.config.as_deref())?;
+        let config = inspect_codex_config(raw_config)?;
+        if config.model_provider.as_deref() != Some(TOOL_PROVIDER_ID) {
+            return Ok(None);
+        }
+        let Some(state) = deserialize_state(snapshot.state.as_deref())? else {
+            return Ok(None);
+        };
+        let projection = relevant_projection(raw_config, snapshot.auth.as_deref())?;
+        let fingerprint = relevant_fingerprint(raw_config, snapshot.auth.as_deref())?;
+        state_fingerprint_matches(&state, &fingerprint, &projection)
+            .map(|matches| matches.then_some(state.active_profile_id).flatten())
     }
 
     fn ensure_live_revisions(&self, expected: &LiveRevisions) -> Result<(), TransactionError> {
@@ -803,6 +921,7 @@ impl TransactionJournal {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum TransactionOperation {
     Apply { profile_id: ProfileId },
+    UpdateContext,
     Restore { source_backup_id: BackupId },
 }
 
@@ -831,6 +950,17 @@ fn serialize_json<T: Serialize>(value: &T) -> Result<Vec<u8>, TransactionError> 
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn state_fingerprint_matches(
+    state: &ManagedState,
+    actual_fingerprint: &str,
+    actual_projection: &RelevantProjection,
+) -> Result<bool, TransactionError> {
+    if state.relevant_fingerprint == actual_fingerprint {
+        return Ok(true);
+    }
+    Ok(state.relevant_fingerprint == pre_context_relevant_fingerprint(actual_projection)?)
 }
 
 fn config_text<'a>(path: &Path, raw: Option<&'a [u8]>) -> Result<&'a str, TransactionError> {
@@ -1097,7 +1227,24 @@ requires_openai_auth = true
             api_key: ApiKey::new("sk-new-secret").unwrap(),
             model: model.to_owned(),
             review_model: Some("review-model".to_owned()),
+            context: None,
         }
+    }
+
+    fn write_pre_context_state(paths: &AppPaths, state: &ManagedState) -> ManagedState {
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let auth = fs::read(&paths.codex_auth).unwrap();
+        let projection = relevant_projection(&config, Some(auth.as_slice())).unwrap();
+        let mut pre_context_state = state.clone();
+        pre_context_state.relevant_fingerprint =
+            pre_context_relevant_fingerprint(&projection).unwrap();
+        assert_ne!(
+            pre_context_state.relevant_fingerprint,
+            state.relevant_fingerprint
+        );
+        durable_fs::atomic_write(&paths.state, &serialize_json(&pre_context_state).unwrap())
+            .unwrap();
+        pre_context_state
     }
 
     #[test]
@@ -1118,6 +1265,147 @@ requires_openai_auth = true
         assert_eq!(manager.load_state().unwrap(), Some(outcome.state));
         assert!(!paths.journal.exists());
         assert_eq!(manager.list_backups().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_usage_history_exposes_only_a_validated_legacy_profile_id() {
+        let (_temp, paths, manager) = fixture();
+        let profile_id = ProfileId::from_uuid(
+            uuid::Uuid::parse_str("e519bc8f-120c-43c3-96b5-a7799f6eec18").unwrap(),
+        );
+        let config = r#"model_provider = "codex_switch"
+model = "gpt-5.6-sol"
+
+[model_providers.codex_switch]
+name = "legacy relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            active_profile_id: Some(profile_id),
+            relevant_fingerprint: relevant_fingerprint(config, Some(ORIGINAL_AUTH)).unwrap(),
+        };
+        durable_fs::atomic_write(&paths.state, &serialize_json(&state).unwrap()).unwrap();
+
+        let history = manager.legacy_usage_history().unwrap();
+
+        assert!(history.backups.is_empty());
+        assert_eq!(history.live.legacy_profile_id, Some(profile_id));
+    }
+
+    #[test]
+    fn context_update_is_transactional_and_preserves_auth_and_managed_state() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("new-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let auth_before = fs::read(&paths.codex_auth).unwrap();
+
+        manager
+            .update_context(ContextSettings {
+                model_context_window: Some(272_000),
+                model_auto_compact_token_limit: Some(217_600),
+                model_auto_compact_token_limit_scope: Some(crate::domain::AutoCompactScope::Total),
+            })
+            .unwrap();
+
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model_context_window = 272000"));
+        assert!(config.contains("model_auto_compact_token_limit = 217600"));
+        assert!(!config.contains("max_output"));
+        assert_eq!(fs::read(&paths.codex_auth).unwrap(), auth_before);
+        let updated_state = manager.load_state().unwrap().unwrap();
+        assert_eq!(
+            updated_state.active_profile_id,
+            applied.state.active_profile_id
+        );
+        assert_ne!(
+            updated_state.relevant_fingerprint,
+            applied.state.relevant_fingerprint
+        );
+        assert_eq!(manager.list_backups().unwrap().len(), 2);
+        assert!(!paths.journal.exists());
+    }
+
+    #[test]
+    fn pre_context_state_fingerprint_does_not_trigger_a_false_apply_conflict() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("first-model"), ConflictPolicy::Reject)
+            .unwrap();
+        write_pre_context_state(&paths, &applied.state);
+
+        let next = activation("second-model");
+        let outcome = manager.apply(&next, ConflictPolicy::Reject).unwrap();
+
+        assert_eq!(outcome.state.active_profile_id, Some(next.profile_id));
+        assert_eq!(manager.load_state().unwrap(), Some(outcome.state));
+    }
+
+    #[test]
+    fn context_update_migrates_pre_context_state_without_losing_active_profile() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let pre_context_state = write_pre_context_state(&paths, &applied.state);
+
+        manager
+            .update_context(ContextSettings {
+                model_context_window: Some(272_000),
+                model_auto_compact_token_limit: Some(217_600),
+                model_auto_compact_token_limit_scope: Some(crate::domain::AutoCompactScope::Total),
+            })
+            .unwrap();
+
+        let updated_state = manager.load_state().unwrap().unwrap();
+        assert_eq!(
+            updated_state.active_profile_id,
+            pre_context_state.active_profile_id
+        );
+        assert_ne!(
+            updated_state.relevant_fingerprint,
+            pre_context_state.relevant_fingerprint
+        );
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let auth = fs::read(&paths.codex_auth).unwrap();
+        assert_eq!(
+            updated_state.relevant_fingerprint,
+            relevant_fingerprint(&config, Some(auth.as_slice())).unwrap()
+        );
+    }
+
+    #[test]
+    fn context_update_rejects_external_managed_changes_without_adopting_them() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap();
+        write_pre_context_state(&paths, &applied.state);
+        let state_before = fs::read(&paths.state).unwrap();
+        let backups_before = manager.list_backups().unwrap().len();
+        let externally_edited = fs::read_to_string(&paths.codex_config)
+            .unwrap()
+            .replace("model = \"managed-model\"", "model = \"external-model\"");
+        durable_fs::atomic_write(&paths.codex_config, externally_edited.as_bytes()).unwrap();
+
+        let error = manager
+            .update_context(ContextSettings {
+                model_context_window: Some(272_000),
+                model_auto_compact_token_limit: Some(217_600),
+                model_auto_compact_token_limit_scope: Some(crate::domain::AutoCompactScope::Total),
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, TransactionError::ExternalConflict(_)));
+        assert_eq!(fs::read(&paths.state).unwrap(), state_before);
+        assert_eq!(manager.list_backups().unwrap().len(), backups_before);
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model = \"external-model\""));
+        assert!(!config.contains("model_context_window"));
     }
 
     #[test]
@@ -1253,6 +1541,29 @@ requires_openai_auth = true
         assert_eq!(fs::read(&paths.codex_auth).unwrap(), ORIGINAL_AUTH);
         assert_eq!(outcome.state.active_profile_id, None);
         assert!(manager.has_backup().unwrap());
+    }
+
+    #[test]
+    fn restore_preserves_active_profile_from_a_pre_context_state() {
+        let (_temp, paths, manager) = fixture();
+        let first = activation("first-model");
+        let first_outcome = manager.apply(&first, ConflictPolicy::Reject).unwrap();
+        manager.remove_backup(first_outcome.backup.id).unwrap();
+        write_pre_context_state(&paths, &first_outcome.state);
+        manager
+            .apply(&activation("second-model"), ConflictPolicy::Reject)
+            .unwrap();
+
+        let outcome = manager.restore_latest().unwrap();
+
+        assert_eq!(outcome.state.active_profile_id, Some(first.profile_id));
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model = \"first-model\""));
+        let auth = fs::read(&paths.codex_auth).unwrap();
+        assert_eq!(
+            outcome.state.relevant_fingerprint,
+            relevant_fingerprint(&config, Some(auth.as_slice())).unwrap()
+        );
     }
 
     #[test]
