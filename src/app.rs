@@ -2768,7 +2768,7 @@ mod tests {
         let expected_height = 36 * scale_factor;
         let expected_row_distance = 57 * scale_factor;
         let mut top_edges = Vec::new();
-        for pair in edge_bands.chunks_exact(2) {
+        for pair in edge_bands.as_chunks::<2>().0 {
             let (top_y, _, top_start, top_end) = pair[0];
             let (_, bottom_y, bottom_start, bottom_end) = pair[1];
             assert_eq!(top_start, bottom_start);
