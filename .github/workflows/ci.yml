@@ -79,7 +79,7 @@ jobs:
           - name: Windows
             os: windows-latest
             artifact: windows
-            package_glob: target/release/*.exe
+            package_glob: target/release/*-setup.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
