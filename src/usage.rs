@@ -4,12 +4,13 @@ use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{
+    DateTime, Duration, FixedOffset, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const UNKNOWN_MODEL: &str = "Unknown";
-const DAILY_HISTORY_DAYS: i64 = 14;
 const MAX_JSONL_LINE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,6 +192,13 @@ pub struct DailyUsage {
     pub usage: TokenUsage,
 }
 
+/// One point in the charted usage series. Today uses local-hour buckets; longer ranges use days.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTrendPoint {
+    pub label: String,
+    pub usage: TokenUsage,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelUsage {
     pub model: String,
@@ -221,6 +229,7 @@ pub struct UsageReport {
     pub current: TokenUsage,
     pub previous: TokenUsage,
     pub daily: Vec<DailyUsage>,
+    pub trend: Vec<UsageTrendPoint>,
     pub model_distribution: Vec<ModelUsage>,
     pub latest_context: Option<LatestContextUsage>,
     /// Legacy shared-provider usage that cannot be proven to belong to any profile.
@@ -426,7 +435,7 @@ fn collect_usage_at<Tz: TimeZone>(
     collect_usage_scoped_at(sessions_dir, archived_sessions_dir, period, &scope, now)
 }
 
-fn collect_usage_scoped_at<Tz: TimeZone>(
+pub(crate) fn collect_usage_scoped_at<Tz: TimeZone>(
     sessions_dir: &Path,
     archived_sessions_dir: &Path,
     period: UsagePeriod,
@@ -458,11 +467,32 @@ fn collect_usage_scoped_at<Tz: TimeZone>(
     Ok(accumulator.finish())
 }
 
+/// Identifies every local-time boundary that can change a report without a source file changing.
+///
+/// The previous-period comparison is intentionally cut off at the current local time, so the
+/// cache cannot be keyed only by source metadata and the named period.
+pub(crate) fn cache_window_fingerprint<Tz: TimeZone>(
+    period: UsagePeriod,
+    now: &DateTime<Tz>,
+) -> Result<String, UsageError> {
+    let windows = UsageWindows::new(now.date_naive(), now.time(), period)?;
+    Ok(format!(
+        "{}|{}|{}|{}|{}|{}",
+        now.fixed_offset().offset().local_minus_utc(),
+        windows.current.start,
+        windows.current.end_exclusive,
+        windows.previous.start,
+        windows.previous.end_exclusive,
+        windows.previous_cutoff,
+    ))
+}
+
 #[derive(Clone, Copy, Debug)]
 struct UsageWindows {
     current: UsageDateRange,
     previous: UsageDateRange,
     daily: UsageDateRange,
+    trend_hour_end: Option<NaiveDateTime>,
     previous_cutoff: NaiveDateTime,
 }
 
@@ -476,21 +506,26 @@ impl UsageWindows {
         let current_start = checked_shift(tomorrow, -period.day_count())?;
         let previous_start = checked_shift(current_start, -period.day_count())?;
         let previous_cutoff = checked_shift(current_start, -1)?.and_time(local_time);
-        let daily_start = checked_shift(tomorrow, -DAILY_HISTORY_DAYS)?;
+        let current = UsageDateRange {
+            start: current_start,
+            end_exclusive: tomorrow,
+        };
+        let trend_hour_end = match period {
+            UsagePeriod::Today => today
+                .and_hms_opt(local_time.hour(), 0, 0)
+                .ok_or(UsageError::DateRangeOutOfBounds)
+                .map(Some)?,
+            UsagePeriod::Last7Days | UsagePeriod::Last30Days => None,
+        };
 
         Ok(Self {
-            current: UsageDateRange {
-                start: current_start,
-                end_exclusive: tomorrow,
-            },
+            current,
             previous: UsageDateRange {
                 start: previous_start,
                 end_exclusive: current_start,
             },
-            daily: UsageDateRange {
-                start: daily_start,
-                end_exclusive: tomorrow,
-            },
+            daily: current,
+            trend_hour_end,
             previous_cutoff,
         })
     }
@@ -513,6 +548,7 @@ struct UsageAccumulator {
     current: TokenUsage,
     previous: TokenUsage,
     daily: BTreeMap<NaiveDate, TokenUsage>,
+    trend: BTreeMap<TrendBucket, TokenUsage>,
     models: BTreeMap<String, TokenUsage>,
     latest: Option<LatestCandidate>,
     unattributed_legacy: TokenUsage,
@@ -520,6 +556,21 @@ struct UsageAccumulator {
     seen_session_ids: BTreeSet<String>,
     skipped_lines: u64,
     skipped_files: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum TrendBucket {
+    Hour(NaiveDateTime),
+    Day(NaiveDate),
+}
+
+impl TrendBucket {
+    fn label(&self) -> String {
+        match self {
+            Self::Hour(hour) => hour.format("%Y-%m-%d %H:00").to_string(),
+            Self::Day(day) => day.to_string(),
+        }
+    }
 }
 
 struct UsageEvent<'a> {
@@ -547,6 +598,30 @@ impl UsageAccumulator {
             daily.insert(date, TokenUsage::default());
             date = checked_shift(date, 1)?;
         }
+        let mut trend = BTreeMap::new();
+        match period {
+            UsagePeriod::Today => {
+                let mut hour = windows
+                    .daily
+                    .start
+                    .and_hms_opt(0, 0, 0)
+                    .ok_or(UsageError::DateRangeOutOfBounds)?;
+                let end = windows
+                    .trend_hour_end
+                    .ok_or(UsageError::DateRangeOutOfBounds)?;
+                while hour <= end {
+                    trend.insert(TrendBucket::Hour(hour), TokenUsage::default());
+                    hour = hour
+                        .checked_add_signed(Duration::hours(1))
+                        .ok_or(UsageError::DateRangeOutOfBounds)?;
+                }
+            }
+            UsagePeriod::Last7Days | UsagePeriod::Last30Days => {
+                for date in daily.keys().copied() {
+                    trend.insert(TrendBucket::Day(date), TokenUsage::default());
+                }
+            }
+        }
 
         Ok(Self {
             period,
@@ -556,6 +631,7 @@ impl UsageAccumulator {
             current: TokenUsage::default(),
             previous: TokenUsage::default(),
             daily,
+            trend,
             models: BTreeMap::new(),
             latest: None,
             unattributed_legacy: TokenUsage::default(),
@@ -593,6 +669,19 @@ impl UsageAccumulator {
 
             if let Some(day) = self.daily.get_mut(&local_date) {
                 day.add_assign_saturating(usage);
+            }
+            let trend_bucket = match self.period {
+                UsagePeriod::Today => local_date
+                    .and_hms_opt(local_timestamp.hour(), 0, 0)
+                    .map(TrendBucket::Hour),
+                UsagePeriod::Last7Days | UsagePeriod::Last30Days => {
+                    Some(TrendBucket::Day(local_date))
+                }
+            };
+            if let Some(bucket) = trend_bucket
+                && let Some(point) = self.trend.get_mut(&bucket)
+            {
+                point.add_assign_saturating(usage);
             }
         }
 
@@ -669,6 +758,14 @@ impl UsageAccumulator {
                 .daily
                 .into_iter()
                 .map(|(date, usage)| DailyUsage { date, usage })
+                .collect(),
+            trend: self
+                .trend
+                .into_iter()
+                .map(|(bucket, usage)| UsageTrendPoint {
+                    label: bucket.label(),
+                    usage,
+                })
                 .collect(),
             model_distribution,
             latest_context: self.latest.map(|latest| latest.usage),
@@ -1512,19 +1609,18 @@ mod tests {
             report.previous_range.end_exclusive,
             report.current_range.start
         );
-        assert_eq!(report.daily.len(), 14);
-        assert_eq!(report.daily.first().unwrap().date.to_string(), "2026-08-13");
+        assert_eq!(report.daily.len(), 7);
+        assert_eq!(report.daily.first().unwrap().date.to_string(), "2026-08-20");
         assert_eq!(report.daily.last().unwrap().date.to_string(), "2026-08-26");
-        assert_eq!(
+        assert!(
             report
                 .daily
                 .iter()
-                .find(|day| day.date.to_string() == "2026-08-19")
-                .unwrap()
-                .usage
-                .input_tokens,
-            5
+                .all(|day| day.date >= report.current_range.start)
         );
+        assert_eq!(report.trend.len(), 7);
+        assert_eq!(report.trend.first().unwrap().label, "2026-08-20");
+        assert_eq!(report.trend.last().unwrap().label, "2026-08-26");
         assert_eq!(
             report
                 .model_distribution
@@ -1948,6 +2044,49 @@ mod tests {
     }
 
     #[test]
+    fn today_trend_uses_local_hour_buckets_through_the_current_hour() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = temp.path().join("sessions");
+        let archived = temp.path().join("archived_sessions");
+        write_lines(
+            &sessions.join("hourly.jsonl"),
+            &[
+                metadata("relay-a", "/work/a"),
+                model("model-a"),
+                token("2026-08-26T08:15:00+08:00", 10, 0, 1, 100),
+                token("2026-08-26T10:45:00+08:00", 20, 0, 2, 100),
+            ],
+        );
+
+        let report = collect_at(&sessions, &archived, UsagePeriod::Today, None);
+
+        assert_eq!(report.daily.len(), 1);
+        assert_eq!(report.trend.len(), 13);
+        assert_eq!(report.trend.first().unwrap().label, "2026-08-26 00:00");
+        assert_eq!(report.trend.last().unwrap().label, "2026-08-26 12:00");
+        assert_eq!(
+            report
+                .trend
+                .iter()
+                .find(|point| point.label == "2026-08-26 08:00")
+                .unwrap()
+                .usage
+                .input_tokens,
+            10
+        );
+        assert_eq!(
+            report
+                .trend
+                .iter()
+                .find(|point| point.label == "2026-08-26 10:00")
+                .unwrap()
+                .usage
+                .input_tokens,
+            20
+        );
+    }
+
+    #[test]
     fn all_periods_use_equal_length_previous_ranges() {
         let today = test_now().date_naive();
         for period in [
@@ -1970,6 +2109,7 @@ mod tests {
             assert_eq!(current_days, period.day_count());
             assert_eq!(previous_days, current_days);
             assert_eq!(windows.previous.end_exclusive, windows.current.start);
+            assert_eq!(windows.daily, windows.current);
         }
     }
 

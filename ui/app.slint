@@ -1258,6 +1258,8 @@ export component AppWindow inherits Window {
     in property <int> usage-calls-delta-tone: 0;
     in property <string> usage-period-total-label: "";
     in property <string> usage-period-models-label: "";
+    in property <string> usage-trend-label: "今日用量趋势 · 红=输入 / 深灰=输出 · 各自按峰值缩放";
+    in property <string> usage-trend-unit-label: "单小时";
     in property <string> usage-total-input: "0";
     in property <string> usage-total-cached: "0";
     in property <string> usage-total-output: "0";
@@ -2082,7 +2084,7 @@ export component AppWindow inherits Window {
                             }
 
                             Rectangle { height: Tokens.space-md; background: Tokens.transparent; }
-                            SectionLabel { label: "每日用量趋势 · 近 14 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放"; }
+                            SectionLabel { label: root.usage-trend-label; }
                             Rectangle { height: 1px; background: Tokens.rule; }
                             Rectangle { height: Tokens.space-sm; background: Tokens.transparent; }
                             chart := Rectangle {
@@ -2173,7 +2175,7 @@ export component AppWindow inherits Window {
                                         padding-bottom: 5px;
                                         spacing: 1px;
                                         Text {
-                                            text: root.usage-trend-points[root.usage-trend-hover-index].date + " · 单日用量";
+                                            text: root.usage-trend-points[root.usage-trend-hover-index].date + " · " + root.usage-trend-unit-label + "用量";
                                             color: Tokens.accent-ink;
                                             font-size: Tokens.text-xs;
                                             font-weight: 600;

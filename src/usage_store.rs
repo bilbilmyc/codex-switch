@@ -3,7 +3,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use chrono::{DateTime, Local, TimeZone};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -51,11 +52,28 @@ impl UsageStore {
         period: UsagePeriod,
         scope: &UsageScope,
     ) -> Result<UsageReport, UsageStoreError> {
+        self.refresh_scoped_at(
+            sessions_dir,
+            archived_sessions_dir,
+            period,
+            scope,
+            Local::now(),
+        )
+    }
+
+    pub(crate) fn refresh_scoped_at<Tz: TimeZone>(
+        &self,
+        sessions_dir: &Path,
+        archived_sessions_dir: &Path,
+        period: UsagePeriod,
+        scope: &UsageScope,
+        now: DateTime<Tz>,
+    ) -> Result<UsageReport, UsageStoreError> {
         let sources = SourceSet::collect(sessions_dir, archived_sessions_dir)?;
-        let signature = sources.signature()?;
+        let window_fingerprint = usage::cache_window_fingerprint(period, &now)?;
+        let signature = sources.report_signature(&window_fingerprint)?;
         let scope_fingerprint = scope_fingerprint(scope)?;
         let mut connection = self.open_connection()?;
-        migrate(&connection)?;
 
         if let Some(cached) =
             load_cached_report(&connection, period, &scope_fingerprint, &signature)?
@@ -66,20 +84,27 @@ impl UsageStore {
             }
         }
 
-        let report =
-            usage::collect_usage_scoped(sessions_dir, archived_sessions_dir, period, scope)?;
-        let report_json = serde_json::to_vec(&report)?;
-        let transaction = connection.transaction()?;
-        store_sources(&transaction, &sources)?;
-        store_report(
-            &transaction,
+        let report = usage::collect_usage_scoped_at(
+            sessions_dir,
+            archived_sessions_dir,
             period,
-            &scope_fingerprint,
-            &signature,
-            &report_json,
+            scope,
+            now,
         )?;
-        transaction.commit()?;
-        set_private_file_mode(&self.path)?;
+        let report_json = serde_json::to_vec(&report)?;
+        if report.skipped_files == 0 {
+            let transaction = connection.transaction()?;
+            store_sources(&transaction, &sources)?;
+            store_report(
+                &transaction,
+                period,
+                &scope_fingerprint,
+                &signature,
+                &report_json,
+            )?;
+            transaction.commit()?;
+            set_private_file_mode(&self.path)?;
+        }
         Ok(report)
     }
 
@@ -90,7 +115,6 @@ impl UsageStore {
         windows: &[ProfileLegacyUsageWindow],
     ) -> Result<Vec<ProfileLegacyUsageWindow>, UsageStoreError> {
         let mut connection = self.open_connection()?;
-        migrate(&connection)?;
         let transaction = connection.transaction()?;
         for window in normalize_profile_windows(windows.to_vec()) {
             transaction.execute(
@@ -116,6 +140,17 @@ impl UsageStore {
             .parent()
             .ok_or_else(|| UsageStoreError::MissingParent(self.path.clone()))?;
         durable_fs::ensure_private_dir(parent)?;
+        match self.open_initialized_connection() {
+            Ok(connection) => Ok(connection),
+            Err(UsageStoreError::Database(error)) if is_rebuildable_database_error(&error) => {
+                durable_fs::atomic_remove(&self.path)?;
+                self.open_initialized_connection()
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_initialized_connection(&self) -> Result<Connection, UsageStoreError> {
         let connection = Connection::open(&self.path)?;
         set_private_file_mode(&self.path)?;
         connection.execute_batch(
@@ -123,8 +158,17 @@ impl UsageStore {
              PRAGMA journal_mode = DELETE;
              PRAGMA synchronous = NORMAL;",
         )?;
+        migrate(&connection)?;
         Ok(connection)
     }
+}
+
+fn is_rebuildable_database_error(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(code, _)
+            if matches!(code.code, ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+    )
 }
 
 #[derive(Debug, Error)]
@@ -341,8 +385,8 @@ impl SourceSet {
         Ok(Self { entries })
     }
 
-    fn signature(&self) -> Result<String, UsageStoreError> {
-        let serialized = serde_json::to_vec(self)?;
+    fn report_signature(&self, window_fingerprint: &str) -> Result<String, UsageStoreError> {
+        let serialized = serde_json::to_vec(&(self, window_fingerprint))?;
         let digest = Sha256::digest(serialized);
         Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
     }
@@ -465,6 +509,10 @@ mod tests {
 
     fn session(provider: &str, input_tokens: u64) -> String {
         let timestamp = chrono::Local::now().to_rfc3339();
+        session_at(provider, &timestamp, input_tokens)
+    }
+
+    fn session_at(provider: &str, timestamp: &str, input_tokens: u64) -> String {
         format!(
             r#"{{"type":"session_meta","payload":{{"id":"session-{provider}","model_provider":"{provider}","cwd":"/work"}}}}
 {{"type":"turn_context","payload":{{"model":"model-{provider}"}}}}
@@ -513,6 +561,72 @@ mod tests {
             .refresh(&sessions, &archived, UsagePeriod::Today, Some("relay-a"))
             .unwrap();
         assert_eq!(rebuilt.current.input_tokens, 12);
+    }
+
+    #[test]
+    fn cache_does_not_cross_a_local_midnight_window_boundary() {
+        let (_temp, sessions, archived, store) = fixture();
+        fs::write(
+            sessions.join("current.jsonl"),
+            format!(
+                "{}{}",
+                session_at("relay-a", "2026-08-26T23:00:00+08:00", 7),
+                session_at("relay-a", "2026-08-27T00:00:00+08:00", 13),
+            ),
+        )
+        .unwrap();
+        let scope = UsageScope::exact("relay-a");
+        let before_midnight =
+            chrono::DateTime::parse_from_rfc3339("2026-08-26T23:59:00+08:00").unwrap();
+        let after_midnight =
+            chrono::DateTime::parse_from_rfc3339("2026-08-27T00:01:00+08:00").unwrap();
+
+        let before = store
+            .refresh_scoped_at(
+                &sessions,
+                &archived,
+                UsagePeriod::Today,
+                &scope,
+                before_midnight,
+            )
+            .unwrap();
+        let after = store
+            .refresh_scoped_at(
+                &sessions,
+                &archived,
+                UsagePeriod::Today,
+                &scope,
+                after_midnight,
+            )
+            .unwrap();
+
+        assert_eq!(before.current.input_tokens, 7);
+        assert_eq!(after.current.input_tokens, 13);
+        assert_ne!(before.current_range, after.current_range);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn does_not_cache_a_partial_report_when_a_jsonl_source_cannot_be_read() {
+        use std::os::unix::fs::symlink;
+
+        let (_temp, sessions, archived, store) = fixture();
+        symlink(
+            sessions.join("missing-target.jsonl"),
+            sessions.join("partial.jsonl"),
+        )
+        .unwrap();
+
+        let report = store
+            .refresh(&sessions, &archived, UsagePeriod::Today, Some("relay-a"))
+            .unwrap();
+
+        assert_eq!(report.skipped_files, 1);
+        let connection = Connection::open(store.path()).unwrap();
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM usage_reports", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[test]
@@ -671,6 +785,53 @@ mod tests {
             .refresh(&sessions, &archived, UsagePeriod::Today, Some("relay-a"))
             .unwrap();
         assert_eq!(rebuilt.current.input_tokens, 7);
+    }
+
+    #[test]
+    fn rebuilds_a_corrupted_database_file() {
+        let (_temp, sessions, archived, store) = fixture();
+        fs::write(sessions.join("current.jsonl"), session("relay-a", 7)).unwrap();
+        fs::write(store.path(), b"this is not a sqlite database").unwrap();
+
+        let report = store
+            .refresh(&sessions, &archived, UsagePeriod::Today, Some("relay-a"))
+            .unwrap();
+
+        assert_eq!(report.current.input_tokens, 7);
+        let connection = Connection::open(store.path()).unwrap();
+        let version: u32 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, DATABASE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn preserves_a_database_with_a_newer_schema() {
+        let (_temp, sessions, archived, store) = fixture();
+        fs::write(sessions.join("current.jsonl"), session("relay-a", 7)).unwrap();
+        let connection = Connection::open(store.path()).unwrap();
+        connection
+            .execute_batch("CREATE TABLE future_data (value TEXT); PRAGMA user_version = 99;")
+            .unwrap();
+        drop(connection);
+
+        let error = store
+            .refresh(&sessions, &archived, UsagePeriod::Today, Some("relay-a"))
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            UsageStoreError::UnsupportedSchema { found: 99, .. }
+        ));
+        let connection = Connection::open(store.path()).unwrap();
+        let value: String = connection
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'future_data'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "future_data");
     }
 
     #[cfg(unix)]

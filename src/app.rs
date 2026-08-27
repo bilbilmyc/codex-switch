@@ -342,6 +342,19 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn install_callbacks(ui: &AppWindow, controller: SharedController) {
     macro_rules! bind {
+        ($handler:ident, |$window:ident, $state:ident, $shared:ident| $body:block) => {{
+            let weak = ui.as_weak();
+            let shared = controller.clone();
+            ui.$handler(move || {
+                let Some($window) = weak.upgrade() else {
+                    return;
+                };
+                let $shared = shared.clone();
+                #[allow(unused_mut)]
+                let mut $state = shared.lock().expect("controller mutex poisoned");
+                $body
+            });
+        }};
         ($handler:ident, |$window:ident, $state:ident| $body:block) => {{
             let weak = ui.as_weak();
             let shared = controller.clone();
@@ -386,20 +399,20 @@ fn install_callbacks(ui: &AppWindow, controller: SharedController) {
         });
     }
 
-    bind!(on_new_profile, |ui, state| {
-        state.new_profile(&ui);
+    bind!(on_new_profile, |ui, state, shared| {
+        state.new_profile(&ui, shared.clone());
     });
-    bind!(on_duplicate_profile, |ui, state| {
-        state.duplicate_profile(&ui);
+    bind!(on_duplicate_profile, |ui, state, shared| {
+        state.duplicate_profile(&ui, shared.clone());
     });
     bind!(on_delete_profile, |ui, state| {
         state.confirm_delete(&ui);
     });
-    bind!(on_import_profiles, |ui, state| {
-        state.import_profiles(&ui);
+    bind!(on_import_profiles, |ui, state, shared| {
+        state.import_profiles(&ui, shared.clone());
     });
-    bind!(on_import_current, |ui, state| {
-        state.import_current(&ui);
+    bind!(on_import_current, |ui, state, shared| {
+        state.import_current(&ui, shared.clone());
     });
     bind!(on_export_profiles, |ui, state| {
         state.dialog = DialogAction::Export;
@@ -925,26 +938,28 @@ impl Controller {
         sync_usage_daily_metrics(ui, report, -1);
         ui.set_usage_period_total_label(usage_period_total_label(report.period).into());
         ui.set_usage_period_models_label(usage_period_models_label(report.period).into());
+        ui.set_usage_trend_label(usage_trend_label(report.period).into());
+        ui.set_usage_trend_unit_label(usage_trend_unit_label(report.period).into());
         ui.set_usage_total_input(format_compact_tokens(current.input_tokens).into());
         ui.set_usage_total_cached(format_compact_tokens(current.cached_input_tokens).into());
         ui.set_usage_total_output(format_compact_tokens(current.output_tokens).into());
         ui.set_usage_total_calls(format!("{} 次", format_integer(current.calls)).into());
 
         ui.set_usage_input_path(
-            usage_line_path(report.daily.iter().map(|day| day.usage.input_tokens)).into(),
+            usage_line_path(report.trend.iter().map(|point| point.usage.input_tokens)).into(),
         );
         ui.set_usage_output_path(
-            usage_line_path(report.daily.iter().map(|day| day.usage.output_tokens)).into(),
+            usage_line_path(report.trend.iter().map(|point| point.usage.output_tokens)).into(),
         );
         let trend_rows: Vec<UsageTrendRow> = report
-            .daily
+            .trend
             .iter()
-            .map(|day| UsageTrendRow {
-                date: day.date.to_string().into(),
-                input: format_integer(day.usage.input_tokens).into(),
-                cached: format_integer(day.usage.cached_input_tokens).into(),
-                output: format_integer(day.usage.output_tokens).into(),
-                calls: format_integer(day.usage.calls).into(),
+            .map(|point| UsageTrendRow {
+                date: point.label.clone().into(),
+                input: format_integer(point.usage.input_tokens).into(),
+                cached: format_integer(point.usage.cached_input_tokens).into(),
+                output: format_integer(point.usage.output_tokens).into(),
+                calls: format_integer(point.usage.calls).into(),
             })
             .collect();
         ui.set_usage_trend_points(ModelRc::new(VecModel::from(trend_rows)));
@@ -1070,10 +1085,31 @@ impl Controller {
     }
 
     fn select_index(&mut self, ui: &AppWindow, index: usize, shared: SharedController) {
-        self.selected = self.profiles.profiles.get(index).map(|profile| profile.id);
+        let selected = self.profiles.profiles.get(index).map(|profile| profile.id);
+        self.select_profile(ui, selected, shared);
+    }
+
+    fn select_profile(
+        &mut self,
+        ui: &AppWindow,
+        selected: Option<ProfileId>,
+        shared: SharedController,
+    ) {
+        self.selected = selected;
         self.sync_profiles(ui);
+        self.invalidate_usage(ui);
         self.reload_selected(ui);
         self.refresh_usage(ui, shared);
+    }
+
+    fn invalidate_usage(&mut self, ui: &AppWindow) {
+        self.usage_report = None;
+        self.usage_refreshed_at = None;
+        self.usage_includes_inferred_legacy_history = false;
+        ui.set_usage_has_data(false);
+        ui.set_usage_error(false);
+        ui.set_usage_trend_points(empty_usage_trend_model());
+        ui.set_usage_models(empty_usage_model());
     }
 
     fn reload_selected(&self, ui: &AppWindow) {
@@ -1134,7 +1170,7 @@ impl Controller {
         }
     }
 
-    fn new_profile(&mut self, ui: &AppWindow) {
+    fn new_profile(&mut self, ui: &AppWindow, shared: SharedController) {
         if !self.save_before_navigation(ui) {
             return;
         }
@@ -1157,13 +1193,11 @@ impl Controller {
             return;
         }
         self.profiles = updated;
-        self.selected = Some(id);
-        self.sync_profiles(ui);
-        self.reload_selected(ui);
+        self.select_profile(ui, Some(id), shared);
         set_status(ui, "已新建中转站，请填写连接信息", 0);
     }
 
-    fn duplicate_profile(&mut self, ui: &AppWindow) {
+    fn duplicate_profile(&mut self, ui: &AppWindow, shared: SharedController) {
         if !self.save_before_navigation(ui) {
             return;
         }
@@ -1182,9 +1216,7 @@ impl Controller {
             return;
         }
         self.profiles = updated;
-        self.selected = Some(id);
-        self.sync_profiles(ui);
-        self.reload_selected(ui);
+        self.select_profile(ui, Some(id), shared);
         set_status(ui, "中转站已复制", 1);
     }
 
@@ -1204,7 +1236,7 @@ impl Controller {
         );
     }
 
-    fn delete_profile(&mut self, ui: &AppWindow, id: ProfileId) {
+    fn delete_profile(&mut self, ui: &AppWindow, id: ProfileId, shared: SharedController) {
         let Some(index) = self
             .profiles
             .profiles
@@ -1221,13 +1253,12 @@ impl Controller {
         }
         self.profiles = updated;
         let _ = models::remove_cache(&self.paths.model_cache_dir, id);
-        self.selected = self
+        let selected = self
             .profiles
             .profiles
             .get(index.min(self.profiles.profiles.len().saturating_sub(1)))
             .map(|profile| profile.id);
-        self.sync_profiles(ui);
-        self.reload_selected(ui);
+        self.select_profile(ui, selected, shared);
         ui.set_editor_open(false);
         set_status(ui, "中转站已删除，当前 Codex 配置未改动", 1);
     }
@@ -1391,45 +1422,31 @@ impl Controller {
         });
     }
 
-    fn import_current(&mut self, ui: &AppWindow) {
+    fn import_current(&mut self, ui: &AppWindow, shared: SharedController) {
         if !self.save_before_navigation(ui) {
             return;
         }
-        self.import_current_into(ui, None);
+        self.import_current_into(ui, shared);
     }
 
-    fn import_current_into(&mut self, ui: &AppWindow, target: Option<ProfileId>) {
+    fn import_current_into(&mut self, ui: &AppWindow, shared: SharedController) {
         match import_live_profile(&self.paths) {
             Ok(mut imported) => {
                 let mut updated = self.profiles.clone();
-                let imported_id = if let Some(target_id) = target {
-                    updated.remove(target_id);
-                    imported.id = target_id;
-                    imported.name = unique_name(&updated, &imported.name);
-                    let id = imported.id;
-                    if let Err(error) = updated.insert(imported) {
-                        set_status(ui, format!("无法导入当前配置：{error}"), 3);
-                        return;
-                    }
-                    id
-                } else {
-                    imported.name = unique_name(&updated, &imported.name);
-                    let id = imported.id;
-                    if let Err(error) = updated.insert(imported) {
-                        set_status(ui, format!("无法导入当前配置：{error}"), 3);
-                        return;
-                    }
-                    id
-                };
+                let imported_id = imported.id;
+                updated.remove(imported_id);
+                imported.name = unique_name(&updated, &imported.name);
+                if let Err(error) = updated.insert(imported) {
+                    set_status(ui, format!("无法导入当前配置：{error}"), 3);
+                    return;
+                }
                 if let Err(error) = self.store.save(&updated) {
                     set_status(ui, format!("无法保存导入的中转站：{error}"), 3);
                     return;
                 }
-                self.selected = Some(imported_id);
                 self.active = Some(imported_id);
                 self.profiles = updated;
-                self.sync_profiles(ui);
-                self.reload_selected(ui);
+                self.select_profile(ui, Some(imported_id), shared);
                 match self.transaction.adopt_current(Some(imported_id)) {
                     Ok(_) => set_status(ui, "已导入当前 Codex 配置", 1),
                     Err(error) => set_status(
@@ -1445,7 +1462,7 @@ impl Controller {
         }
     }
 
-    fn import_profiles(&mut self, ui: &AppWindow) {
+    fn import_profiles(&mut self, ui: &AppWindow, shared: SharedController) {
         if !self.save_before_navigation(ui) {
             return;
         }
@@ -1484,9 +1501,7 @@ impl Controller {
             return;
         }
         self.profiles = updated;
-        self.selected = last_id.or(self.selected);
-        self.sync_profiles(ui);
-        self.reload_selected(ui);
+        self.select_profile(ui, last_id.or(self.selected), shared);
         set_status(ui, "中转站已导入；未包含密钥的中转站需补填 API Key", 1);
     }
 
@@ -1582,7 +1597,7 @@ fn handle_dialog_primary(ui: &AppWindow, shared: SharedController) {
             shared
                 .lock()
                 .expect("controller mutex poisoned")
-                .delete_profile(ui, id);
+                .delete_profile(ui, id, shared.clone());
         }
         DialogAction::ChangeSelection(index) => {
             let mut controller = shared.lock().expect("controller mutex poisoned");
@@ -1636,13 +1651,13 @@ fn handle_dialog_primary(ui: &AppWindow, shared: SharedController) {
             }
         }
         DialogAction::ApplyConflict {
-            activation,
+            activation: _,
             desktop_executable,
         } => {
             shared
                 .lock()
                 .expect("controller mutex poisoned")
-                .import_current_into(ui, Some(activation.profile_id));
+                .import_current_into(ui, shared.clone());
             relaunch_if_needed(ui, desktop_executable);
         }
         DialogAction::ContextProcess {
@@ -2321,6 +2336,14 @@ fn empty_string_model() -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(Vec::<SharedString>::new()))
 }
 
+fn empty_usage_trend_model() -> ModelRc<UsageTrendRow> {
+    ModelRc::new(VecModel::from(Vec::<UsageTrendRow>::new()))
+}
+
+fn empty_usage_model() -> ModelRc<UsageModelRow> {
+    ModelRc::new(VecModel::from(Vec::<UsageModelRow>::new()))
+}
+
 fn open_dialog(
     ui: &AppWindow,
     title: impl Into<SharedString>,
@@ -2497,6 +2520,21 @@ fn usage_period_models_label(period: UsagePeriod) -> &'static str {
         UsagePeriod::Today => "今日模型分布",
         UsagePeriod::Last7Days => "所选范围模型分布 · 近 7 天",
         UsagePeriod::Last30Days => "所选范围模型分布 · 近 30 天",
+    }
+}
+
+fn usage_trend_label(period: UsagePeriod) -> &'static str {
+    match period {
+        UsagePeriod::Today => "今日用量趋势 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
+        UsagePeriod::Last7Days => "每日用量趋势 · 近 7 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
+        UsagePeriod::Last30Days => "每日用量趋势 · 近 30 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
+    }
+}
+
+fn usage_trend_unit_label(period: UsagePeriod) -> &'static str {
+    match period {
+        UsagePeriod::Today => "单小时",
+        UsagePeriod::Last7Days | UsagePeriod::Last30Days => "单日",
     }
 }
 
@@ -3226,6 +3264,15 @@ requires_openai_auth = true
         assert_eq!(usage_trend_hover_index(14, 1.0), Some(13));
         assert_eq!(usage_trend_hover_index(14, 1.2), Some(13));
         assert_eq!(usage_trend_hover_index(14, f32::NAN), None);
+    }
+
+    #[test]
+    fn usage_trend_label_matches_the_selected_period() {
+        assert!(usage_trend_label(UsagePeriod::Today).starts_with("今日"));
+        assert!(usage_trend_label(UsagePeriod::Last7Days).contains("近 7 天"));
+        assert!(usage_trend_label(UsagePeriod::Last30Days).contains("近 30 天"));
+        assert_eq!(usage_trend_unit_label(UsagePeriod::Today), "单小时");
+        assert_eq!(usage_trend_unit_label(UsagePeriod::Last7Days), "单日");
     }
 
     #[test]

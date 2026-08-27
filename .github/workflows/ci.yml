@@ -11,6 +11,19 @@ permissions:
   contents: read
 
 jobs:
+  validate-release-version:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Require the tag to match Cargo package version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          package_version="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "codex-switch") | .version')"
+          test "$GITHUB_REF_NAME" = "v$package_version"
+
   check:
     name: Check (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
@@ -37,7 +50,7 @@ jobs:
 
   package:
     name: Package (${{ matrix.name }})
-    needs: check
+    needs: [check, validate-release-version]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

@@ -91,6 +91,17 @@ pub fn provider_id_for_profile(profile_id: ProfileId) -> String {
     format!("{TOOL_PROVIDER_ID_PREFIX}{}", profile_id.as_uuid().simple())
 }
 
+/// Recovers the stable profile identity encoded in providers written by this application.
+///
+/// The original shared provider name intentionally has no embedded identity and therefore does
+/// not match this function.
+pub fn profile_id_from_provider_id(provider_id: &str) -> Option<ProfileId> {
+    provider_id
+        .strip_prefix(TOOL_PROVIDER_ID_PREFIX)
+        .and_then(|suffix| uuid::Uuid::parse_str(suffix).ok())
+        .map(ProfileId::from_uuid)
+}
+
 pub fn inspect_codex_config(raw: &str) -> Result<ConfigProjection, CodexConfigError> {
     let document = parse_document(raw)?;
     inspect_document(&document)
@@ -290,6 +301,9 @@ pub fn import_current_profile(
         imported.model,
         imported.review_model,
     )?;
+    if let Some(profile_id) = profile_id_from_provider_id(&imported.provider_id) {
+        profile.id = profile_id;
+    }
     profile.context = Some(imported.context);
     profile.validate()?;
     Ok(profile)
@@ -459,10 +473,7 @@ fn inspect_tool_provider(
 }
 
 fn is_tool_provider_id(provider_id: &str) -> bool {
-    provider_id == TOOL_PROVIDER_ID
-        || provider_id
-            .strip_prefix(TOOL_PROVIDER_ID_PREFIX)
-            .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok())
+    provider_id == TOOL_PROVIDER_ID || profile_id_from_provider_id(provider_id).is_some()
 }
 
 fn provider_registry_mut(root: &mut Table) -> Result<&mut Table, CodexConfigError> {
@@ -1016,6 +1027,32 @@ requires_openai_auth = true
             profile.api_key.as_ref().unwrap().expose_secret(),
             "sk-imported"
         );
+    }
+
+    #[test]
+    fn importing_a_managed_provider_preserves_its_profile_id() {
+        let profile_id = ProfileId::from_uuid(
+            uuid::Uuid::parse_str("e519bc8f-120c-43c3-96b5-a7799f6eec18").unwrap(),
+        );
+        let provider_id = provider_id_for_profile(profile_id);
+        let config = format!(
+            r#"
+model_provider = "{provider_id}"
+model = "gpt-5"
+
+[model_providers.{provider_id}]
+name = "Managed Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        );
+
+        let profile =
+            import_current_profile(&config, Some(br#"{"OPENAI_API_KEY":"sk-imported"}"#)).unwrap();
+
+        assert_eq!(profile.id, profile_id);
+        assert_eq!(provider_id_for_profile(profile.id), provider_id);
     }
 
     #[test]
