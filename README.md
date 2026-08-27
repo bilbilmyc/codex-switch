@@ -99,7 +99,9 @@ Codex 配置没有生成输出 Token 上限字段，因此本工具不会写入�
 - macOS：`Codex Switch.app` 和 `.dmg`。
 - Windows：NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
 
-在没有配置开发者签名证书时，产物是未签名的。macOS Gatekeeper 或 Windows SmartScreen 可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。
+在没有配置开发者签名证书时，产物是未签名的。macOS Gatekeeper 或 Windows SmartScreen 可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 会在挂载时显示简体中文 MIT 许可证；这是 DMG 的安装许可提示，不是应用的运行条款。
+
+面向组织外部发布 macOS 安装包时，应使用 Apple Developer ID 签名并向 Apple 公证 DMG。当前公开 Release 没有配置这类凭据，适合已确认来源的内部使用，不应宣称为已公证发行版。
 
 ## 本地开发
 
@@ -128,4 +130,4 @@ GitHub Actions 在 macOS 和 Windows 上执行格式检查、Clippy、测试和�
 
 ## 许可
 
-Codex Switch 使用 [MIT License](LICENSE)。Slint 和 Lucide 图标的许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。应用顶部可访问的“关于”界面包含 Slint 的 `AboutSlint` 组件，用于满足所选 Slint royalty-free 许可的署名条件。
+Codex Switch 使用 [MIT License](LICENSE)。[简体中文译文](LICENSE.zh-CN.txt) 用于阅读，RTF 版本用于 macOS DMG 挂载时的安装许可提示；英文文本为权威版本。Slint 和 Lucide 图标的许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。应用顶部可访问的“关于”界面包含 Slint 的 `AboutSlint` 组件，用于满足所选 Slint royalty-free 许可的署名条件。
