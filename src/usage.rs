@@ -1872,38 +1872,29 @@ mod tests {
     }
 
     #[test]
-    fn one_unreadable_root_still_returns_a_partial_report() {
+    fn one_invalid_session_root_still_returns_a_partial_report() {
         let temp = tempfile::tempdir().unwrap();
         let sessions = temp.path().join("sessions");
         fs::create_dir(&sessions).unwrap();
-        let blocker = temp.path().join("not-a-directory");
-        fs::write(&blocker, b"blocker").unwrap();
+        let invalid_archive_root = temp.path().join("invalid-archive-root");
+        fs::write(&invalid_archive_root, b"not a JSONL session root").unwrap();
 
-        let report = collect_at(
-            &sessions,
-            &blocker.join("archive"),
-            UsagePeriod::Today,
-            None,
-        );
+        let report = collect_at(&sessions, &invalid_archive_root, UsagePeriod::Today, None);
 
         assert_eq!(report.current, TokenUsage::default());
         assert_eq!(report.skipped_files, 1);
     }
 
     #[test]
-    fn all_existing_session_roots_unreadable_returns_an_error() {
+    fn all_invalid_session_roots_return_an_error() {
         let temp = tempfile::tempdir().unwrap();
-        let blocker = temp.path().join("not-a-directory");
-        fs::write(&blocker, b"blocker").unwrap();
+        let sessions = temp.path().join("invalid-sessions-root");
+        let archived = temp.path().join("invalid-archive-root");
+        fs::write(&sessions, b"not a JSONL session root").unwrap();
+        fs::write(&archived, b"not a JSONL session root").unwrap();
 
-        let error = collect_usage_at(
-            &blocker.join("sessions"),
-            &blocker.join("archive"),
-            UsagePeriod::Today,
-            None,
-            test_now(),
-        )
-        .unwrap_err();
+        let error = collect_usage_at(&sessions, &archived, UsagePeriod::Today, None, test_now())
+            .unwrap_err();
 
         assert_eq!(error, UsageError::SessionRootsUnreadable);
     }
