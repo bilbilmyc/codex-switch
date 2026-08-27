@@ -99,7 +99,7 @@ Codex 配置没有生成输出 Token 上限字段，因此本工具不会写入�
 - macOS：`Codex Switch.app` 和 `.dmg`。
 - Windows：NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
 
-在没有配置开发者签名证书时，产物是未签名的。macOS Gatekeeper 或 Windows SmartScreen 可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 不要求接受单独的安装条款；将 `Codex Switch.app` 拖到“应用程序”后，弹出安装磁盘，再从“应用程序”启动即可。
+macOS 发布包在最终写入资源后使用临时签名校验其完整性，但没有 Apple Developer ID 证书。Gatekeeper 或 Windows SmartScreen 仍可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 不要求接受单独的安装条款；将 `Codex Switch.app` 拖到“应用程序”后，弹出安装磁盘，再从“应用程序”启动即可。
 
 面向组织外部发布 macOS 安装包时，应使用 Apple Developer ID 签名并向 Apple 公证 DMG。当前公开 Release 没有配置这类凭据，适合已确认来源的内部使用，不应宣称为已公证发行版。
 

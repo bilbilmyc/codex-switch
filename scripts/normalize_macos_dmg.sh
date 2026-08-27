@@ -36,6 +36,17 @@ mounted=true
 rm -f "$mount_dir/.VolumeIcon.icns"
 SetFile -a c "$mount_dir"
 
+app_path="$(find "$mount_dir" -maxdepth 1 -type d -name '*.app' -print -quit)"
+if [[ -z "$app_path" ]]; then
+  echo "No application bundle found in DMG: $dmg_path" >&2
+  exit 1
+fi
+
+# cargo-packager signs before it finishes copying bundle resources. Re-signing
+# here makes the packaged app's resource seal match its final contents.
+codesign --force --deep --sign - "$app_path"
+codesign --verify --deep --strict --verbose=2 "$app_path"
+
 hdiutil detach "$mount_dir" -quiet
 mounted=false
 hdiutil convert "$rw_dmg" -format UDZO -imagekey zlib-level=9 -o "$output_dmg" -quiet
