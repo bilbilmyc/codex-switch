@@ -99,7 +99,7 @@ Codex 配置没有生成输出 Token 上限字段，因此本工具不会写入�
 - macOS：`Codex Switch.app` 和 `.dmg`。
 - Windows：NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
 
-在没有配置开发者签名证书时，产物是未签名的。macOS Gatekeeper 或 Windows SmartScreen 可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 会在挂载时显示简体中文 MIT 许可证；这是 DMG 的安装许可提示，不是应用的运行条款。
+在没有配置开发者签名证书时，产物是未签名的。macOS Gatekeeper 或 Windows SmartScreen 可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 不要求接受单独的安装条款；将 `Codex Switch.app` 拖到“应用程序”后，弹出安装磁盘，再从“应用程序”启动即可。
 
 面向组织外部发布 macOS 安装包时，应使用 Apple Developer ID 签名并向 Apple 公证 DMG。当前公开 Release 没有配置这类凭据，适合已确认来源的内部使用，不应宣称为已公证发行版。
 
@@ -124,10 +124,10 @@ cargo install cargo-packager --version 0.11.8 --locked
 cargo packager --release
 ```
 
-原生安装包应在对应目标系统上构建，默认输出到 `target/release/`。配置中的 `formats = ["default"]` 在 macOS 上生成 `.app` 与 `.dmg`，在 Windows 上生成 NSIS 安装器。Windows 安装器使用 `currentUser` 模式。
+原生安装包应在对应目标系统上构建，默认输出到 `target/release/`。配置中的 `formats = ["default"]` 在 macOS 上生成 `.app` 与 `.dmg`，在 Windows 上生成 NSIS 安装器。Windows 安装器使用 `currentUser` 模式。macOS 打包后还需要运行 `scripts/normalize_macos_dmg.sh target/release/*.dmg`，以清除安装盘的应用图标，避免 Finder 在卷图标上叠加状态标识。
 
 GitHub Actions 在 macOS 和 Windows 上执行格式检查、Clippy、测试和原生打包，并分别上传 `.dmg` 与 `.exe` 构件。手动运行工作流或推送 tag 时，也会保留对应平台的安装包供下载。
 
 ## 许可
 
-Codex Switch 使用 [MIT License](LICENSE)。[简体中文译文](LICENSE.zh-CN.txt) 用于阅读，RTF 版本用于 macOS DMG 挂载时的安装许可提示；英文文本为权威版本。Slint 和 Lucide 图标的许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。应用顶部可访问的“关于”界面包含 Slint 的 `AboutSlint` 组件，用于满足所选 Slint royalty-free 许可的署名条件。
+Codex Switch 使用 [MIT License](LICENSE)。[简体中文译文](LICENSE.zh-CN.txt) 用于阅读，英文文本为权威版本。Slint 和 Lucide 图标的许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。应用顶部可访问的“关于”界面包含 Slint 的 `AboutSlint` 组件，用于满足所选 Slint royalty-free 许可的署名条件。

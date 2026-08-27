@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.92"
 description = "A small desktop switcher for Codex relay providers and default models"
@@ -58,7 +58,6 @@ long-description = "Switch API-key-based Codex relay providers and their default
 category = "Utility"
 before-packaging-command = "cargo build --release"
 formats = ["default"]
-license-file = "DMG_LICENSE_zh-CN.rtf"
 icons = [
   "assets/app-icon.png",
   "assets/app-icon.icns",
