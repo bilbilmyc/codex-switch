@@ -9,7 +9,8 @@ use chrono::Local;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use crate::codex_config::{
-    self, CodexConfigError, ContextSettings, TOOL_PROVIDER_ID, provider_id_for_profile,
+    self, CodexConfigError, ContextSettings, TOOL_PROVIDER_ID, profile_id_from_provider_id,
+    provider_id_for_profile,
 };
 use crate::codex_validator::CodexStagedValidator;
 use crate::context::{self, InstructionScope};
@@ -2247,6 +2248,12 @@ fn recognize_active_profile(
     transaction: &TransactionManager,
     profiles: &ProfilesDocument,
 ) -> Option<ProfileId> {
+    // Profiles written by current versions carry a stable UUID in `model_provider`. It remains
+    // the source of truth for the active relay even when the saved profile was edited later.
+    if let Some(profile_id) = managed_live_profile_id(paths) {
+        return profiles.get(profile_id).map(|_| profile_id);
+    }
+
     let imported = import_live_profile(paths).ok()?;
     if let Ok(Some(state)) = transaction.load_state()
         && current_fingerprint_matches(paths, &state.relevant_fingerprint)
@@ -2262,6 +2269,18 @@ fn recognize_active_profile(
         .iter()
         .find(|profile| same_connection(profile, &imported))
         .map(|profile| profile.id)
+}
+
+fn managed_live_profile_id(paths: &AppPaths) -> Option<ProfileId> {
+    let config_bytes = durable_fs::read_optional(&paths.codex_config)
+        .ok()
+        .flatten()?;
+    let config = std::str::from_utf8(&config_bytes).ok()?;
+    codex_config::inspect_codex_config(config)
+        .ok()?
+        .model_provider
+        .as_deref()
+        .and_then(profile_id_from_provider_id)
 }
 
 fn current_fingerprint_matches(paths: &AppPaths, expected: &str) -> bool {
@@ -2983,7 +3002,7 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn edited_profile_is_not_reported_as_the_live_configuration() {
+    fn managed_provider_identity_keeps_an_edited_profile_reported_as_active() {
         let temp = tempfile::tempdir().unwrap();
         let paths = AppPaths::from_home(temp.path());
         durable_fs::atomic_write(&paths.codex_config, b"").unwrap();
@@ -3015,6 +3034,43 @@ requires_openai_auth = true
         assert!(recognize_active_profile(&paths, &manager, &document).is_some());
 
         document.profiles[0].model = "model-after".to_owned();
+        assert_eq!(
+            recognize_active_profile(&paths, &manager, &document),
+            Some(document.profiles[0].id)
+        );
+    }
+
+    #[test]
+    fn unknown_managed_provider_is_not_matched_by_connection_details() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(temp.path());
+        let manager = TransactionManager::new(paths.clone());
+        let profile = Profile::new(
+            "Relay",
+            "https://relay.example/v1",
+            ApiKey::new("sk-test").unwrap(),
+            "gpt-5.6-sol",
+            None,
+        )
+        .unwrap();
+        let mut document = ProfilesDocument::default();
+        document.insert(profile).unwrap();
+
+        let unknown_provider = provider_id_for_profile(ProfileId::new());
+        let config = format!(
+            r#"model_provider = "{unknown_provider}"
+model = "gpt-5.6-sol"
+
+[model_providers.{unknown_provider}]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        );
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        durable_fs::atomic_write(&paths.codex_auth, br#"{"OPENAI_API_KEY":"sk-test"}"#).unwrap();
+
         assert_eq!(recognize_active_profile(&paths, &manager, &document), None);
     }
 
