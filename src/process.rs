@@ -156,8 +156,10 @@ fn request_desktop_quit_for(report: &ProcessReport) -> Result<(), ProcessError> 
     {
         for pid in report.desktop_pids() {
             let script = windows_close_main_window_script(pid);
-            let status = Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+            hide_child_window(&mut command);
+            let status = command
                 .status()
                 .map_err(|error| ProcessError::Quit(error.to_string()))?;
             if !status.success() {
@@ -300,6 +302,20 @@ fn windows_close_main_window_script(pid: u32) -> String {
     )
 }
 
+#[cfg(any(test, target_os = "windows"))]
+const fn windows_background_creation_flags() -> u32 {
+    0x0800_0000
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn hide_child_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(windows_background_creation_flags());
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn hide_child_window(_command: &mut Command) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +370,11 @@ mod tests {
         assert!(!script.contains("-Name"));
         assert!(!script.contains("Codex"));
         assert!(!script.contains("ChatGPT"));
+    }
+
+    #[test]
+    fn windows_background_commands_do_not_create_a_console_window() {
+        assert_eq!(windows_background_creation_flags(), 0x0800_0000);
     }
 
     #[test]

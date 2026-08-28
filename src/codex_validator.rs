@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use crate::process::hide_child_window;
+
 pub use crate::transaction::StagedValidator;
 
 const CODEX_BINARY_OVERRIDE: &str = "CODEX_SWITCH_CODEX_BINARY";
@@ -57,7 +59,7 @@ impl CodexStagedValidator {
             .map_err(|_| VALIDATION_SETUP_FAILED.to_owned())?;
         let diagnostic = staged
             .run(&self.binary, self.timeout)
-            .map_err(|_| VALIDATION_LAUNCH_FAILED.to_owned())?;
+            .map_err(|error| format!("{VALIDATION_LAUNCH_FAILED}: {error}"))?;
 
         if diagnostic_indicates_config_rejection(&diagnostic) {
             Err(VALIDATION_REJECTED.to_owned())
@@ -224,27 +226,34 @@ fn resolve_override(override_value: &OsStr, path_value: Option<&OsStr>) -> Optio
 }
 
 fn find_on_path(binary_name: &OsStr, path_value: Option<&OsStr>) -> Option<PathBuf> {
+    find_on_path_for_platform(binary_name, path_value, cfg!(target_os = "windows"))
+}
+
+fn find_on_path_for_platform(
+    binary_name: &OsStr,
+    path_value: Option<&OsStr>,
+    windows: bool,
+) -> Option<PathBuf> {
     let path_value = path_value?;
-    let names = executable_names(binary_name);
+    let names = executable_names_for_platform(binary_name, windows);
     env::split_paths(path_value)
         .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
         .find(|candidate| is_usable_binary(candidate))
 }
 
-fn executable_names(binary_name: &OsStr) -> Vec<OsString> {
-    #[cfg(target_os = "windows")]
-    {
-        let path = Path::new(binary_name);
-        if path.extension().is_some() {
-            return vec![binary_name.to_owned()];
-        }
-        let mut executable = binary_name.to_owned();
-        executable.push(".exe");
-        vec![executable, binary_name.to_owned()]
+fn executable_names_for_platform(binary_name: &OsStr, windows: bool) -> Vec<OsString> {
+    if !windows || Path::new(binary_name).extension().is_some() {
+        return vec![binary_name.to_owned()];
     }
 
-    #[cfg(not(target_os = "windows"))]
-    vec![binary_name.to_owned()]
+    [".exe", ".cmd", ".bat"]
+        .into_iter()
+        .map(|extension| {
+            let mut executable = binary_name.to_owned();
+            executable.push(extension);
+            executable
+        })
+        .collect()
 }
 
 fn is_usable_binary(path: &Path) -> bool {
@@ -314,16 +323,6 @@ fn set_private_file_permissions(_file: &File) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn hide_child_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn hide_child_window(_command: &mut Command) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,12 +378,27 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path_binary = directory
             .path()
-            .join(executable_names(OsStr::new("codex"))[0].clone());
+            .join(executable_names_for_platform(OsStr::new("codex"), false)[0].clone());
         make_executable(&path_binary);
         let path = env::join_paths([directory.path()]).unwrap();
 
         let discovered = discover_binary(None, Some(path.as_os_str()), &[]);
         assert_eq!(discovered.as_deref(), Some(path_binary.as_path()));
+    }
+
+    #[test]
+    fn windows_path_discovery_prefers_the_cmd_shim_over_the_unix_shim() {
+        let directory = tempfile::tempdir().unwrap();
+        let unix_shim = directory.path().join("codex");
+        let cmd_shim = directory.path().join("codex.cmd");
+        make_executable(&unix_shim);
+        make_executable(&cmd_shim);
+        let path = env::join_paths([directory.path()]).unwrap();
+
+        let discovered =
+            find_on_path_for_platform(OsStr::new("codex"), Some(path.as_os_str()), true);
+
+        assert_eq!(discovered.as_deref(), Some(cmd_shim.as_path()));
     }
 
     #[test]
