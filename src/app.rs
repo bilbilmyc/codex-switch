@@ -187,6 +187,12 @@ enum DialogAction {
         desktop_only: bool,
         completion: ContextCompletion,
     },
+    ContextConflict {
+        profile_id: ProfileId,
+        settings: ContextSettings,
+        desktop_executable: Option<PathBuf>,
+        completion: ContextCompletion,
+    },
     RestoreProcess {
         desktop_executable: Option<PathBuf>,
         desktop_only: bool,
@@ -209,6 +215,7 @@ struct ContextUpdateRequest {
     completion: ContextCompletion,
     quit_desktop: bool,
     desktop_executable: Option<PathBuf>,
+    policy: ConflictPolicy,
 }
 
 struct Controller {
@@ -233,6 +240,7 @@ enum ApplyWorkerResult {
     Applied {
         state: ManagedState,
         relaunch_error: Option<String>,
+        validation_skipped: bool,
     },
     Conflict {
         detail: String,
@@ -247,6 +255,21 @@ enum ApplyWorkerResult {
 enum RestoreWorkerResult {
     Restored {
         relaunch_error: Option<String>,
+    },
+    Failed {
+        message: String,
+        recovery_required: bool,
+    },
+}
+
+enum ContextWorkerResult {
+    Updated {
+        relaunch_error: Option<String>,
+        validation_skipped: bool,
+    },
+    Conflict {
+        detail: String,
+        desktop_executable: Option<PathBuf>,
     },
     Failed {
         message: String,
@@ -810,6 +833,7 @@ impl Controller {
                     completion,
                     quit_desktop: false,
                     desktop_executable: None,
+                    policy: ConflictPolicy::Reject,
                 },
             );
             return;
@@ -1276,6 +1300,10 @@ impl Controller {
                 return false;
             }
         };
+        let invalidate_model_cache = self
+            .profiles
+            .get(id)
+            .is_some_and(|saved| !same_model_catalog(saved, &profile));
         let mut updated = self.profiles.clone();
         let Some(existing) = updated.get_mut(id) else {
             return false;
@@ -1288,6 +1316,12 @@ impl Controller {
         self.profiles = updated;
         self.active = recognize_active_profile(&self.paths, &self.transaction, &self.profiles);
         self.sync_profiles(ui);
+        if invalidate_model_cache {
+            let _ = models::remove_cache(&self.paths.model_cache_dir, id);
+            ui.set_model_names(empty_string_model());
+            ui.set_model_index(-1);
+            ui.set_model_cache_label("连接信息已更改，请重新获取模型列表".into());
+        }
         ui.set_draft_dirty(false);
         set_status(ui, "中转站已保存", 1);
         true
@@ -1394,25 +1428,52 @@ impl Controller {
         let weak = ui.as_weak();
         let cache_dir = self.paths.model_cache_dir.clone();
         thread::spawn(move || {
-            let result = models::fetch_models(&profile)
-                .and_then(|cache| {
-                    models::save_cache(&cache_dir, &cache)?;
-                    Ok(cache)
-                })
-                .map_err(|error| error.to_string());
+            let result = models::fetch_models(&profile).map_err(|error| error.to_string());
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_busy(false);
                 let controller = shared.lock().expect("controller mutex poisoned");
                 match result {
                     Ok(cache) if controller.selected == Some(cache.profile_id) => {
                         set_model_list(&ui, &cache.models, &ui.get_draft_model());
-                        ui.set_model_cache_label(
-                            format!("刚刚获取了 {} 个模型", cache.models.len()).into(),
-                        );
-                        set_status(&ui, "模型列表已更新", 1);
+                        if profile_owns_model_cache(
+                            controller.profiles.get(cache.profile_id),
+                            &profile,
+                        ) {
+                            match models::save_cache(&cache_dir, &cache) {
+                                Ok(()) => {
+                                    ui.set_model_cache_label(
+                                        format!("刚刚获取了 {} 个模型", cache.models.len()).into(),
+                                    );
+                                    set_status(&ui, "模型列表已更新", 1);
+                                }
+                                Err(error) => set_status(
+                                    &ui,
+                                    format!("模型已获取，但缓存保存失败：{error}"),
+                                    2,
+                                ),
+                            }
+                        } else {
+                            ui.set_model_cache_label(
+                                format!("已获取 {} 个模型；保存连接后可缓存", cache.models.len())
+                                    .into(),
+                            );
+                            set_status(&ui, "模型列表已更新，未保存草稿不会写入缓存", 2);
+                        }
                     }
-                    Ok(_) => {
-                        set_status(&ui, "模型列表已缓存到对应中转站", 1);
+                    Ok(cache) => {
+                        if profile_owns_model_cache(
+                            controller.profiles.get(cache.profile_id),
+                            &profile,
+                        ) {
+                            match models::save_cache(&cache_dir, &cache) {
+                                Ok(()) => set_status(&ui, "模型列表已缓存到对应中转站", 1),
+                                Err(error) => set_status(
+                                    &ui,
+                                    format!("模型已获取，但缓存保存失败：{error}"),
+                                    2,
+                                ),
+                            }
+                        }
                     }
                     Err(error) => {
                         set_status(&ui, format!("模型获取失败：{error}"), 3);
@@ -1427,10 +1488,10 @@ impl Controller {
         if !self.save_before_navigation(ui) {
             return;
         }
-        self.import_current_into(ui, shared);
+        let _ = self.import_current_into(ui, shared);
     }
 
-    fn import_current_into(&mut self, ui: &AppWindow, shared: SharedController) {
+    fn import_current_into(&mut self, ui: &AppWindow, shared: SharedController) -> bool {
         match import_live_profile(&self.paths) {
             Ok(mut imported) => {
                 let mut updated = self.profiles.clone();
@@ -1439,11 +1500,11 @@ impl Controller {
                 imported.name = unique_name(&updated, &imported.name);
                 if let Err(error) = updated.insert(imported) {
                     set_status(ui, format!("无法导入当前配置：{error}"), 3);
-                    return;
+                    return false;
                 }
                 if let Err(error) = self.store.save(&updated) {
                     set_status(ui, format!("无法保存导入的中转站：{error}"), 3);
-                    return;
+                    return false;
                 }
                 self.active = Some(imported_id);
                 self.profiles = updated;
@@ -1456,9 +1517,11 @@ impl Controller {
                         2,
                     ),
                 }
+                true
             }
             Err(error) => {
                 set_status(ui, format!("当前配置无法导入：{error}"), 3);
+                false
             }
         }
     }
@@ -1684,6 +1747,7 @@ fn handle_dialog_primary(ui: &AppWindow, shared: SharedController) {
                         completion,
                         quit_desktop: true,
                         desktop_executable,
+                        policy: ConflictPolicy::Reject,
                     },
                 );
             } else {
@@ -1715,6 +1779,24 @@ fn handle_dialog_primary(ui: &AppWindow, shared: SharedController) {
                     .lock()
                     .expect("controller mutex poisoned")
                     .begin_restore(ui, shared.clone());
+            }
+        }
+        DialogAction::ContextConflict {
+            desktop_executable,
+            completion,
+            ..
+        } => {
+            let imported = {
+                let mut controller = shared.lock().expect("controller mutex poisoned");
+                let imported = controller.import_current_into(ui, shared.clone());
+                if imported {
+                    controller.complete_context_action(ui, completion, shared.clone());
+                }
+                imported
+            };
+            relaunch_if_needed(ui, desktop_executable);
+            if !imported {
+                ui.set_context_sync_error(true);
             }
         }
         DialogAction::Close => {
@@ -1809,6 +1891,32 @@ fn handle_dialog_secondary(ui: &AppWindow, shared: SharedController) {
                     completion,
                     quit_desktop: false,
                     desktop_executable: None,
+                    policy: ConflictPolicy::Reject,
+                },
+            );
+        }
+        DialogAction::ContextConflict {
+            profile_id,
+            settings,
+            desktop_executable,
+            completion,
+        } => {
+            let paths = shared
+                .lock()
+                .expect("controller mutex poisoned")
+                .paths
+                .clone();
+            spawn_context_update(
+                ui,
+                shared,
+                paths,
+                ContextUpdateRequest {
+                    profile_id,
+                    settings,
+                    completion,
+                    quit_desktop: false,
+                    desktop_executable,
+                    policy: ConflictPolicy::Overwrite,
                 },
             );
         }
@@ -1842,6 +1950,20 @@ fn handle_dialog_tertiary(ui: &AppWindow, shared: SharedController) {
         DialogAction::ApplyConflict {
             desktop_executable, ..
         } => relaunch_if_needed(ui, desktop_executable),
+        DialogAction::ContextConflict {
+            profile_id,
+            desktop_executable,
+            ..
+        } => {
+            relaunch_if_needed(ui, desktop_executable);
+            let controller = shared.lock().expect("controller mutex poisoned");
+            if controller.selected == Some(profile_id) {
+                ui.set_context_sync_error(true);
+                ui.set_context_status("上下文配置 · 已保存，尚未同步到 Codex".into());
+                ui.set_context_status_tone(2);
+            }
+            set_status(ui, "上下文配置已保存，但尚未同步到 Codex", 2);
+        }
         DialogAction::ContextProcess { profile_id, .. } => {
             let controller = shared.lock().expect("controller mutex poisoned");
             if controller.selected == Some(profile_id) {
@@ -1867,6 +1989,7 @@ fn spawn_context_update(
         completion,
         quit_desktop,
         desktop_executable,
+        policy,
     } = request;
     ui.set_busy(true);
     ui.set_context_sync_error(false);
@@ -1876,37 +1999,45 @@ fn spawn_context_update(
     let weak = ui.as_weak();
     thread::spawn(move || {
         let process_result = if quit_desktop {
-            process::request_desktop_quit()
-                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
-                .map_err(|error| error.to_string())
+            process::quit_desktop_safely(Duration::from_secs(8)).map_err(|error| error.to_string())
         } else {
             Ok(())
         };
         let result = match process_result {
             Err(error) => {
-                if desktop_executable.is_some() {
-                    let _ = process::relaunch_desktop(desktop_executable.as_deref());
+                let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
+                ContextWorkerResult::Failed {
+                    message: error,
+                    recovery_required: false,
                 }
-                Err((error, false))
             }
             Ok(()) => {
                 let manager = TransactionManager::new(paths.clone());
-                let validator = CodexStagedValidator::discover();
+                let validator =
+                    CodexStagedValidator::discover_for_desktop(desktop_executable.as_deref());
+                let validation_skipped = validator.is_none();
                 let staged_validator = validator
                     .as_ref()
                     .map(|validator| validator as &dyn crate::transaction::StagedValidator);
-                match manager.update_context_validated(settings, staged_validator) {
-                    Ok(_) => Ok(desktop_executable
-                        .as_deref()
-                        .and_then(|path| process::relaunch_desktop(Some(path)).err())
-                        .map(|error| error.to_string())),
+                match manager.update_context_with_policy(settings, policy, staged_validator) {
+                    Ok(_) => ContextWorkerResult::Updated {
+                        relaunch_error: relaunch_desktop_if_closed(desktop_executable.as_deref()),
+                        validation_skipped,
+                    },
+                    Err(TransactionError::ExternalConflict(conflict)) => {
+                        ContextWorkerResult::Conflict {
+                            detail: conflict.to_string(),
+                            desktop_executable,
+                        }
+                    }
                     Err(error) => {
                         let recovery_required =
                             matches!(&error, TransactionError::RollbackFailed { .. });
-                        if desktop_executable.is_some() {
-                            let _ = process::relaunch_desktop(desktop_executable.as_deref());
+                        let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
+                        ContextWorkerResult::Failed {
+                            message: error.to_string(),
+                            recovery_required,
                         }
-                        Err((error.to_string(), recovery_required))
                     }
                 }
             }
@@ -1915,7 +2046,10 @@ fn spawn_context_update(
             ui.set_busy(false);
             let mut controller = shared.lock().expect("controller mutex poisoned");
             match result {
-                Ok(relaunch_error) => {
+                ContextWorkerResult::Updated {
+                    relaunch_error,
+                    validation_skipped,
+                } => {
                     controller.active = recognize_active_profile(
                         &controller.paths,
                         &controller.transaction,
@@ -1926,17 +2060,55 @@ fn spawn_context_update(
                     if controller.selected == Some(profile_id) {
                         controller.sync_context(&ui);
                     }
-                    match relaunch_error {
-                        Some(error) => set_status(
+                    match (relaunch_error, validation_skipped) {
+                        (Some(error), _) => set_status(
                             &ui,
                             format!("上下文配置已同步，但 Codex Desktop 未能重新打开：{error}"),
                             2,
                         ),
-                        None => set_status(&ui, "上下文配置已同步，新会话生效", 1),
+                        (None, true) => set_status(
+                            &ui,
+                            "上下文配置已同步；未找到 Codex 校验器，仅完成结构校验",
+                            2,
+                        ),
+                        (None, false) => set_status(&ui, "上下文配置已同步，新会话生效", 1),
                     }
                     controller.complete_context_action(&ui, completion, shared.clone());
                 }
-                Err((message, recovery_required)) => {
+                ContextWorkerResult::Conflict {
+                    detail,
+                    desktop_executable,
+                } => {
+                    controller.dialog = DialogAction::ContextConflict {
+                        profile_id,
+                        settings,
+                        desktop_executable,
+                        completion,
+                    };
+                    ui.set_context_sync_error(true);
+                    ui.set_context_status("上下文配置 · 检测到外部修改".into());
+                    ui.set_context_status_tone(2);
+                    open_dialog(
+                        &ui,
+                        "检测到外部修改",
+                        format!(
+                            "Codex 配置已在工具外发生变化。{}\n请选择如何继续。",
+                            if detail.is_empty() {
+                                String::new()
+                            } else {
+                                format!("\n{detail}")
+                            }
+                        ),
+                        "导入当前",
+                        "保留外部并同步",
+                        "取消",
+                        false,
+                    );
+                }
+                ContextWorkerResult::Failed {
+                    message,
+                    recovery_required,
+                } => {
                     controller.active = recognize_active_profile(
                         &controller.paths,
                         &controller.transaction,
@@ -1983,18 +2155,14 @@ fn spawn_apply(
     let weak = ui.as_weak();
     thread::spawn(move || {
         let process_result = if quit_desktop {
-            process::request_desktop_quit()
-                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
-                .map_err(|error| error.to_string())
+            process::quit_desktop_safely(Duration::from_secs(8)).map_err(|error| error.to_string())
         } else {
             Ok(())
         };
 
         let worker_result = match process_result {
             Err(error) => {
-                if desktop_executable.is_some() {
-                    let _ = process::relaunch_desktop(desktop_executable.as_deref());
-                }
+                let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                 ApplyWorkerResult::Failed {
                     message: error,
                     recovery_required: false,
@@ -2002,19 +2170,20 @@ fn spawn_apply(
             }
             Ok(()) => {
                 let manager = TransactionManager::new(paths);
-                let validator = CodexStagedValidator::discover();
+                let validator =
+                    CodexStagedValidator::discover_for_desktop(desktop_executable.as_deref());
+                let validation_skipped = validator.is_none();
                 let staged_validator = validator
                     .as_ref()
                     .map(|validator| validator as &dyn crate::transaction::StagedValidator);
                 match manager.apply_validated(&activation, policy, staged_validator) {
                     Ok(outcome) => {
-                        let relaunch_error = desktop_executable
-                            .as_deref()
-                            .and_then(|path| process::relaunch_desktop(Some(path)).err())
-                            .map(|error| error.to_string());
+                        let relaunch_error =
+                            relaunch_desktop_if_closed(desktop_executable.as_deref());
                         ApplyWorkerResult::Applied {
                             state: outcome.state,
                             relaunch_error,
+                            validation_skipped,
                         }
                     }
                     Err(TransactionError::ExternalConflict(conflict)) => {
@@ -2026,9 +2195,7 @@ fn spawn_apply(
                     Err(error) => {
                         let recovery_required =
                             matches!(&error, TransactionError::RollbackFailed { .. });
-                        if desktop_executable.is_some() {
-                            let _ = process::relaunch_desktop(desktop_executable.as_deref());
-                        }
+                        let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                         ApplyWorkerResult::Failed {
                             message: error.to_string(),
                             recovery_required,
@@ -2045,17 +2212,21 @@ fn spawn_apply(
                 ApplyWorkerResult::Applied {
                     state,
                     relaunch_error,
+                    validation_skipped,
                 } => {
                     controller.active = state.active_profile_id;
                     controller.sync_profiles(&ui);
                     ui.set_can_restore(true);
-                    match relaunch_error {
-                        Some(error) => set_status(
+                    match (relaunch_error, validation_skipped) {
+                        (Some(error), _) => set_status(
                             &ui,
                             format!("切换完成，但 Codex Desktop 未能重新打开：{error}"),
                             2,
                         ),
-                        None => set_status(&ui, "切换完成", 1),
+                        (None, true) => {
+                            set_status(&ui, "切换完成；未找到 Codex 校验器，仅完成结构校验", 2)
+                        }
+                        (None, false) => set_status(&ui, "切换完成", 1),
                     }
                 }
                 ApplyWorkerResult::Conflict {
@@ -2114,17 +2285,13 @@ fn spawn_restore(
     let weak = ui.as_weak();
     thread::spawn(move || {
         let process_result = if quit_desktop {
-            process::request_desktop_quit()
-                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
-                .map_err(|error| error.to_string())
+            process::quit_desktop_safely(Duration::from_secs(8)).map_err(|error| error.to_string())
         } else {
             Ok(())
         };
         let worker_result = match process_result {
             Err(error) => {
-                if desktop_executable.is_some() {
-                    let _ = process::relaunch_desktop(desktop_executable.as_deref());
-                }
+                let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                 RestoreWorkerResult::Failed {
                     message: error,
                     recovery_required: false,
@@ -2132,18 +2299,13 @@ fn spawn_restore(
             }
             Ok(()) => match TransactionManager::new(paths).restore_latest() {
                 Ok(_) => {
-                    let relaunch_error = desktop_executable
-                        .as_deref()
-                        .and_then(|path| process::relaunch_desktop(Some(path)).err())
-                        .map(|error| error.to_string());
+                    let relaunch_error = relaunch_desktop_if_closed(desktop_executable.as_deref());
                     RestoreWorkerResult::Restored { relaunch_error }
                 }
                 Err(error) => {
                     let recovery_required =
                         matches!(&error, TransactionError::RollbackFailed { .. });
-                    if desktop_executable.is_some() {
-                        let _ = process::relaunch_desktop(desktop_executable.as_deref());
-                    }
+                    let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                     RestoreWorkerResult::Failed {
                         message: error.to_string(),
                         recovery_required,
@@ -2313,6 +2475,15 @@ fn same_connection(left: &Profile, right: &Profile) -> bool {
         && left
             .context
             .is_none_or(|context| right.context == Some(context))
+}
+
+fn same_model_catalog(left: &Profile, right: &Profile) -> bool {
+    left.base_url == right.base_url && left.api_key == right.api_key
+}
+
+fn profile_owns_model_cache(saved: Option<&Profile>, fetched_from: &Profile) -> bool {
+    saved
+        .is_some_and(|saved| saved.id == fetched_from.id && same_model_catalog(saved, fetched_from))
 }
 
 fn unique_name(document: &ProfilesDocument, requested: &str) -> String {
@@ -2699,11 +2870,19 @@ fn format_compact_tokens(value: u64) -> String {
 }
 
 fn relaunch_if_needed(ui: &AppWindow, executable: Option<PathBuf>) {
-    if let Some(executable) = executable
-        && let Err(error) = process::relaunch_desktop(Some(&executable))
-    {
+    if let Some(error) = relaunch_desktop_if_closed(executable.as_deref()) {
         set_status(ui, format!("Codex Desktop 未能重新打开：{error}"), 2);
     }
+}
+
+fn relaunch_desktop_if_closed(executable: Option<&Path>) -> Option<String> {
+    let executable = executable?;
+    if process::detect_codex_processes().has_desktop() {
+        return None;
+    }
+    process::relaunch_desktop(Some(executable))
+        .err()
+        .map(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -2816,6 +2995,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(unique_name(&document, "relay"), "relay 2");
+    }
+
+    #[test]
+    fn unsaved_connection_draft_does_not_own_the_saved_profiles_model_cache() {
+        let saved = Profile::new(
+            "Relay",
+            "https://relay-a.example/v1",
+            ApiKey::new("sk-a").unwrap(),
+            "model-a",
+            None,
+        )
+        .unwrap();
+        let mut draft = saved.clone();
+        draft.base_url = "https://relay-b.example/v1".to_owned();
+        draft.api_key = Some(ApiKey::new("sk-b").unwrap());
+
+        assert!(profile_owns_model_cache(Some(&saved), &saved));
+        assert!(!profile_owns_model_cache(Some(&saved), &draft));
+        assert!(!profile_owns_model_cache(None, &draft));
     }
 
     #[test]

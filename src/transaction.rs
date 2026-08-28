@@ -225,12 +225,21 @@ impl TransactionManager {
         &self,
         settings: ContextSettings,
     ) -> Result<BackupSummary, TransactionError> {
-        self.update_context_validated(settings, None)
+        self.update_context_with_policy(settings, ConflictPolicy::Reject, None)
     }
 
     pub fn update_context_validated(
         &self,
         settings: ContextSettings,
+        validator: Option<&dyn StagedValidator>,
+    ) -> Result<BackupSummary, TransactionError> {
+        self.update_context_with_policy(settings, ConflictPolicy::Reject, validator)
+    }
+
+    pub fn update_context_with_policy(
+        &self,
+        settings: ContextSettings,
+        policy: ConflictPolicy,
         validator: Option<&dyn StagedValidator>,
     ) -> Result<BackupSummary, TransactionError> {
         let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
@@ -241,7 +250,8 @@ impl TransactionManager {
         let actual_projection = relevant_projection(current_config, current.auth.as_deref())?;
         let actual_fingerprint = relevant_fingerprint(current_config, current.auth.as_deref())?;
         let current_state = deserialize_state(current.state.as_deref())?;
-        if let Some(state) = &current_state
+        if policy == ConflictPolicy::Reject
+            && let Some(state) = &current_state
             && !state_fingerprint_matches(state, &actual_fingerprint, &actual_projection)?
         {
             return Err(TransactionError::ExternalConflict(Box::new(
@@ -1406,6 +1416,40 @@ requires_openai_auth = true
         let config = fs::read_to_string(&paths.codex_config).unwrap();
         assert!(config.contains("model = \"external-model\""));
         assert!(!config.contains("model_context_window"));
+    }
+
+    #[test]
+    fn context_update_can_preserve_external_changes_after_explicit_confirmation() {
+        let (_temp, paths, manager) = fixture();
+        manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let externally_edited = fs::read_to_string(&paths.codex_config)
+            .unwrap()
+            .replace("model = \"managed-model\"", "model = \"external-model\"");
+        durable_fs::atomic_write(&paths.codex_config, externally_edited.as_bytes()).unwrap();
+
+        manager
+            .update_context_with_policy(
+                ContextSettings {
+                    model_context_window: Some(272_000),
+                    model_auto_compact_token_limit: Some(217_600),
+                    model_auto_compact_token_limit_scope: Some(
+                        crate::domain::AutoCompactScope::Total,
+                    ),
+                },
+                ConflictPolicy::Overwrite,
+                None,
+            )
+            .unwrap();
+
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model = \"external-model\""));
+        assert!(config.contains("model_context_window = 272000"));
+        assert_eq!(
+            manager.load_state().unwrap().unwrap().relevant_fingerprint,
+            relevant_fingerprint(&config, Some(&fs::read(&paths.codex_auth).unwrap())).unwrap()
+        );
     }
 
     #[test]

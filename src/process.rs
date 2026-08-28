@@ -32,8 +32,11 @@ impl ProcessReport {
         self.processes.is_empty()
     }
 
-    pub fn is_desktop_clear(&self) -> bool {
+    fn is_safe_after_desktop_shutdown(&self, known_helper_pids: &[u32]) -> bool {
         !self.has_desktop()
+            && self.processes.iter().all(|process| {
+                process.kind != ProcessKind::CommandLine || known_helper_pids.contains(&process.pid)
+            })
     }
 
     pub fn has_desktop(&self) -> bool {
@@ -81,11 +84,17 @@ pub enum ProcessError {
     Quit(String),
     #[error("Codex Desktop did not exit before the timeout")]
     ExitTimeout,
+    #[error("a Codex command-line task started while Desktop was closing")]
+    CommandLineStarted,
     #[error("could not restart Codex Desktop: {0}")]
     Relaunch(String),
 }
 
 pub fn detect_codex_processes() -> ProcessReport {
+    detect_codex_processes_with_helpers().0
+}
+
+fn detect_codex_processes_with_helpers() -> (ProcessReport, Vec<u32>) {
     let mut system = System::new();
     system.refresh_processes_specifics(
         ProcessesToUpdate::All,
@@ -102,6 +111,7 @@ pub fn detect_codex_processes() -> ProcessReport {
         .collect();
 
     let mut processes = Vec::new();
+    let mut desktop_helper_pids = Vec::new();
     for pid in &desktop_pids {
         if let Some(process) = system.process(*pid) {
             processes.push(RunningCodexProcess {
@@ -114,10 +124,11 @@ pub fn detect_codex_processes() -> ProcessReport {
     }
 
     for (pid, process) in system.processes() {
-        if desktop_pids.contains(pid)
-            || !is_codex_binary(process.name())
-            || descends_from(*pid, &desktop_pids, &system)
-        {
+        if desktop_pids.contains(pid) || !is_codex_binary(process.name()) {
+            continue;
+        }
+        if descends_from(*pid, &desktop_pids, &system) {
+            desktop_helper_pids.push(pid.as_u32());
             continue;
         }
         processes.push(RunningCodexProcess {
@@ -129,12 +140,8 @@ pub fn detect_codex_processes() -> ProcessReport {
     }
 
     processes.sort_by_key(|process| process.pid);
-    ProcessReport { processes }
-}
-
-pub fn request_desktop_quit() -> Result<(), ProcessError> {
-    let report = detect_codex_processes();
-    request_desktop_quit_for(&report)
+    desktop_helper_pids.sort_unstable();
+    (ProcessReport { processes }, desktop_helper_pids)
 }
 
 fn request_desktop_quit_for(report: &ProcessReport) -> Result<(), ProcessError> {
@@ -181,11 +188,21 @@ fn request_desktop_quit_for(report: &ProcessReport) -> Result<(), ProcessError> 
     ))
 }
 
-pub fn wait_until_desktop_clear(timeout: Duration) -> Result<(), ProcessError> {
+pub fn quit_desktop_safely(timeout: Duration) -> Result<(), ProcessError> {
+    let (report, desktop_helper_pids) = detect_codex_processes_with_helpers();
+    if report.has_command_line() {
+        return Err(ProcessError::CommandLineStarted);
+    }
+    request_desktop_quit_for(&report)?;
+
     let deadline = Instant::now() + timeout;
     loop {
-        if detect_codex_processes().is_desktop_clear() {
+        let report = detect_codex_processes();
+        if report.is_safe_after_desktop_shutdown(&desktop_helper_pids) {
             return Ok(());
+        }
+        if !report.has_desktop() && report.has_command_line() {
+            return Err(ProcessError::CommandLineStarted);
         }
         if Instant::now() >= deadline {
             return Err(ProcessError::ExitTimeout);
@@ -289,7 +306,21 @@ fn is_windows_desktop_identity(name: &OsStr, executable: &Path) -> bool {
     }
 
     let normalized = normalized_path(executable);
-    normalized == "chatgpt.exe" || normalized.ends_with("/chatgpt.exe")
+    if !normalized.ends_with("/chatgpt.exe") {
+        return false;
+    }
+
+    let components: Vec<_> = normalized.split('/').collect();
+    let store_install = components
+        .iter()
+        .any(|component| component.starts_with("openai.chatgpt"));
+    let openai_install = components
+        .windows(2)
+        .any(|parts| parts == ["openai", "chatgpt"]);
+    let program_files_install = components
+        .windows(2)
+        .any(|parts| parts == ["program files", "chatgpt"]);
+    store_install || openai_install || program_files_install
 }
 
 #[cfg(any(test, target_os = "macos", target_os = "windows"))]
@@ -352,10 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn windows_desktop_accepts_chatgpt_but_never_codex_exe() {
+    fn windows_desktop_requires_a_trusted_chatgpt_install_path() {
         assert!(is_windows_desktop_identity(
             OsStr::new("ChatGPT.exe"),
-            Path::new(r"C:\Program Files\ChatGPT\ChatGPT.exe")
+            Path::new(
+                r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.0.0.0_x64__test\app\ChatGPT.exe"
+            )
+        ));
+        assert!(is_windows_desktop_identity(
+            OsStr::new("ChatGPT.exe"),
+            Path::new(r"C:\Users\me\AppData\Local\Programs\OpenAI\ChatGPT\ChatGPT.exe")
+        ));
+        assert!(!is_windows_desktop_identity(
+            OsStr::new("ChatGPT.exe"),
+            Path::new(r"C:\Temp\ChatGPT.exe")
         ));
         assert!(!is_windows_desktop_identity(
             OsStr::new("Codex.exe"),
@@ -403,10 +444,18 @@ mod tests {
     }
 
     #[test]
-    fn desktop_shutdown_completion_ignores_command_line_processes() {
-        let command_line_only = ProcessReport {
+    fn desktop_shutdown_allows_only_helpers_seen_before_quit() {
+        let known_helper = ProcessReport {
             processes: vec![RunningCodexProcess {
                 pid: 12,
+                kind: ProcessKind::CommandLine,
+                label: String::new(),
+                executable: None,
+            }],
+        };
+        let newly_started_cli = ProcessReport {
+            processes: vec![RunningCodexProcess {
+                pid: 13,
                 kind: ProcessKind::CommandLine,
                 label: String::new(),
                 executable: None,
@@ -421,7 +470,8 @@ mod tests {
             }],
         };
 
-        assert!(command_line_only.is_desktop_clear());
-        assert!(!desktop_running.is_desktop_clear());
+        assert!(known_helper.is_safe_after_desktop_shutdown(&[12]));
+        assert!(!newly_started_cli.is_safe_after_desktop_shutdown(&[12]));
+        assert!(!desktop_running.is_safe_after_desktop_shutdown(&[12]));
     }
 }

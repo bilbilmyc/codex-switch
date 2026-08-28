@@ -155,4 +155,27 @@ mod tests {
             "profile file contains invalid TOML",
         ));
     }
+
+    #[test]
+    fn windows_icon_contains_multiple_shell_sizes() {
+        let icon = include_bytes!("../assets/app-icon.ico");
+        let image_count = u16::from_le_bytes([icon[4], icon[5]]);
+
+        assert!(image_count >= 7, "ICO contains only {image_count} image(s)");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_executable_contains_the_application_icon_resource() {
+        use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::LoadIconW;
+
+        let module = unsafe { GetModuleHandleW(std::ptr::null()) };
+        assert!(!module.is_null());
+        let icon = unsafe { LoadIconW(module, 1_usize as *const u16) };
+        assert!(
+            !icon.is_null(),
+            "Windows executable has no icon resource #1"
+        );
+    }
 }

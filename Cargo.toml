@@ -1,6 +1,6 @@
 [package]
 name = "codex-switch"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 rust-version = "1.92"
 description = "A small desktop switcher for Codex relay providers and default models"
@@ -34,6 +34,7 @@ url = "2.5"
 uuid = { version = "1", features = ["serde", "v4"] }
 
 [build-dependencies]
+embed-resource = "=3.0.11"
 slint-build = "=1.17.1"
 
 [dev-dependencies]
@@ -43,6 +44,8 @@ tiny_http = "0.12"
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_Storage_FileSystem",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 
 [profile.release]
