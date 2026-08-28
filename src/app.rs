@@ -19,6 +19,7 @@ use crate::durable_fs;
 use crate::legacy_usage::{
     ProfileLegacyUsageWindow, normalize_profile_windows, reconstruct_legacy_usage,
 };
+use crate::logging;
 use crate::models;
 use crate::paths::AppPaths;
 use crate::process;
@@ -279,6 +280,10 @@ enum ContextWorkerResult {
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let paths = AppPaths::discover()?;
+    if let Err(error) = logging::initialize(&paths) {
+        eprintln!("Codex Switch could not initialize diagnostic logging: {error}");
+    }
+    logging::info("startup", "initializing application state");
     durable_fs::ensure_private_dir(&paths.tool_dir)?;
     let instance_lock = durable_fs::acquire_lock(&paths.instance_lock)?;
     durable_fs::ensure_private_dir(&paths.model_cache_dir)?;
@@ -289,6 +294,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let store = ProfileStore::new(paths.profiles.clone());
     let first_run = !paths.profiles.exists();
     let mut profiles = store.load()?;
+    logging::info(
+        "startup",
+        format!("loaded {} saved profile(s)", profiles.profiles.len()),
+    );
 
     let mut startup_status = match recovery {
         crate::transaction::RecoveryOutcome::None => "就绪".to_owned(),
@@ -317,12 +326,20 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         startup_tone = 1;
                     }
                     Err(error) => {
+                        logging::warn(
+                            "startup",
+                            format!("could not adopt current configuration: {error}"),
+                        );
                         startup_status = format!("已导入当前配置，但无法建立冲突检测基线：{error}");
                         startup_tone = 2;
                     }
                 }
             }
             Err(_) => {
+                logging::warn(
+                    "startup",
+                    "could not import the existing Codex configuration",
+                );
                 store.save(&profiles)?;
                 startup_status = "未能自动导入当前配置，可手动新建中转站".to_owned();
                 startup_tone = 2;
@@ -1991,6 +2008,10 @@ fn spawn_context_update(
         desktop_executable,
         policy,
     } = request;
+    logging::info(
+        "context",
+        format!("starting context synchronization for profile {profile_id}"),
+    );
     ui.set_busy(true);
     ui.set_context_sync_error(false);
     ui.set_context_status("上下文配置 · 正在同步到 Codex".into());
@@ -2005,6 +2026,7 @@ fn spawn_context_update(
         };
         let result = match process_result {
             Err(error) => {
+                logging::error("context", format!("could not stop Codex Desktop: {error}"));
                 let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                 ContextWorkerResult::Failed {
                     message: error,
@@ -2016,6 +2038,12 @@ fn spawn_context_update(
                 let validator =
                     CodexStagedValidator::discover_for_desktop(desktop_executable.as_deref());
                 let validation_skipped = validator.is_none();
+                if validation_skipped {
+                    logging::warn(
+                        "context",
+                        "Codex validator was not found; using structure validation only",
+                    );
+                }
                 let staged_validator = validator
                     .as_ref()
                     .map(|validator| validator as &dyn crate::transaction::StagedValidator);
@@ -2025,12 +2053,17 @@ fn spawn_context_update(
                         validation_skipped,
                     },
                     Err(TransactionError::ExternalConflict(conflict)) => {
+                        logging::warn(
+                            "context",
+                            format!("external configuration conflict: {conflict}"),
+                        );
                         ContextWorkerResult::Conflict {
                             detail: conflict.to_string(),
                             desktop_executable,
                         }
                     }
                     Err(error) => {
+                        logging::error("context", format!("synchronization failed: {error}"));
                         let recovery_required =
                             matches!(&error, TransactionError::RollbackFailed { .. });
                         let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
@@ -2150,6 +2183,13 @@ fn spawn_apply(
     quit_desktop: bool,
     desktop_executable: Option<PathBuf>,
 ) {
+    logging::info(
+        "switch",
+        format!(
+            "starting relay switch for profile {}",
+            activation.profile_id
+        ),
+    );
     ui.set_busy(true);
     set_status(ui, "正在切换 Codex 配置", 0);
     let weak = ui.as_weak();
@@ -2162,6 +2202,7 @@ fn spawn_apply(
 
         let worker_result = match process_result {
             Err(error) => {
+                logging::error("switch", format!("could not stop Codex Desktop: {error}"));
                 let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                 ApplyWorkerResult::Failed {
                     message: error,
@@ -2173,11 +2214,18 @@ fn spawn_apply(
                 let validator =
                     CodexStagedValidator::discover_for_desktop(desktop_executable.as_deref());
                 let validation_skipped = validator.is_none();
+                if validation_skipped {
+                    logging::warn(
+                        "switch",
+                        "Codex validator was not found; using structure validation only",
+                    );
+                }
                 let staged_validator = validator
                     .as_ref()
                     .map(|validator| validator as &dyn crate::transaction::StagedValidator);
                 match manager.apply_validated(&activation, policy, staged_validator) {
                     Ok(outcome) => {
+                        logging::info("switch", "relay switch committed successfully");
                         let relaunch_error =
                             relaunch_desktop_if_closed(desktop_executable.as_deref());
                         ApplyWorkerResult::Applied {
@@ -2187,12 +2235,17 @@ fn spawn_apply(
                         }
                     }
                     Err(TransactionError::ExternalConflict(conflict)) => {
+                        logging::warn(
+                            "switch",
+                            format!("external configuration conflict: {conflict}"),
+                        );
                         ApplyWorkerResult::Conflict {
                             detail: conflict.to_string(),
                             desktop_executable,
                         }
                     }
                     Err(error) => {
+                        logging::error("switch", format!("relay switch failed: {error}"));
                         let recovery_required =
                             matches!(&error, TransactionError::RollbackFailed { .. });
                         let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
@@ -2280,6 +2333,7 @@ fn spawn_restore(
     quit_desktop: bool,
     desktop_executable: Option<PathBuf>,
 ) {
+    logging::info("restore", "starting latest backup restore");
     ui.set_busy(true);
     set_status(ui, "正在恢复最近备份", 0);
     let weak = ui.as_weak();
@@ -2291,6 +2345,7 @@ fn spawn_restore(
         };
         let worker_result = match process_result {
             Err(error) => {
+                logging::error("restore", format!("could not stop Codex Desktop: {error}"));
                 let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
                 RestoreWorkerResult::Failed {
                     message: error,
@@ -2299,10 +2354,12 @@ fn spawn_restore(
             }
             Ok(()) => match TransactionManager::new(paths).restore_latest() {
                 Ok(_) => {
+                    logging::info("restore", "latest backup restored successfully");
                     let relaunch_error = relaunch_desktop_if_closed(desktop_executable.as_deref());
                     RestoreWorkerResult::Restored { relaunch_error }
                 }
                 Err(error) => {
+                    logging::error("restore", format!("restore failed: {error}"));
                     let recovery_required =
                         matches!(&error, TransactionError::RollbackFailed { .. });
                     let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());

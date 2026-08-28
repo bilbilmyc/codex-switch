@@ -26,6 +26,7 @@ pub struct AppPaths {
     /// Process-lifetime lock. Transaction serialization continues to use `lock`.
     pub instance_lock: PathBuf,
     pub lock: PathBuf,
+    pub logs_dir: PathBuf,
     pub model_cache_dir: PathBuf,
     pub usage_database: PathBuf,
     pub backups_dir: PathBuf,
@@ -52,6 +53,7 @@ impl AppPaths {
             journal: tool_dir.join("transaction.json"),
             instance_lock: tool_dir.join(".instance.lock"),
             lock: tool_dir.join(".lock"),
+            logs_dir: tool_dir.join("logs"),
             model_cache_dir: tool_dir.join("model-cache"),
             usage_database: tool_dir.join("usage.sqlite3"),
             backups_dir: tool_dir.join("backups"),
@@ -122,6 +124,7 @@ mod tests {
             home.join(".codex-switch/.instance.lock")
         );
         assert_eq!(paths.lock, home.join(".codex-switch/.lock"));
+        assert_eq!(paths.logs_dir, home.join(".codex-switch/logs"));
         assert_eq!(
             paths.model_cache_file(ProfileId::from_uuid(
                 uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()

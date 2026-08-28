@@ -5,6 +5,7 @@ pub mod context;
 pub mod domain;
 pub mod durable_fs;
 pub mod legacy_usage;
+pub mod logging;
 pub mod models;
 pub mod paths;
 pub mod process;

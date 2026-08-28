@@ -78,6 +78,7 @@ fn main() {
             }
             error_message
         };
+        codex_switch::logging::record_startup_error(&error_message);
         show_startup_error(&error_message);
         std::process::exit(1);
     }

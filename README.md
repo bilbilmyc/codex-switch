@@ -113,7 +113,7 @@ cargo test
 cargo build --release
 ```
 
-应用只读写当前用户家目录下的 `~/.codex` 和 `~/.codex-switch`。开发测试前建议先备份真实的 `~/.codex/config.toml` 与 `~/.codex/auth.json`。
+应用只读写当前用户家目录下的 `~/.codex` 和 `~/.codex-switch`。发生问题时可查看 `~/.codex-switch/logs/codex-switch-YYYY-MM-DD.log`；日志记录启动、校验、切换、冲突、回滚和恢复结果，但不会记录 API Key 或 `auth.json` 内容。开发测试前建议先备份真实的 `~/.codex/config.toml` 与 `~/.codex/auth.json`。
 
 ## 打包
 

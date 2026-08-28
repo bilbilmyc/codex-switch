@@ -74,16 +74,33 @@ impl CodexStagedValidator {
     }
 
     fn validate_candidate(&self, config_toml: &str, auth_json: &[u8]) -> Result<(), String> {
+        crate::logging::info(
+            "validation",
+            "preparing isolated Codex configuration validation",
+        );
         let staged = StagedCodexHome::create(
             config_toml.as_bytes(),
             auth_json,
             self.source_codex_home.as_deref(),
         )
-        .map_err(|error| validation_setup_error(&error))?;
-        let run = staged
-            .run(&self.binary, self.timeout)
-            .map_err(|error| format!("{VALIDATION_LAUNCH_FAILED}: {error}"))?;
-        classify_validation_run(run.exit_success, &run.diagnostic)
+        .map_err(|error| {
+            let message = validation_setup_error(&error);
+            crate::logging::error("validation", &message);
+            message
+        })?;
+        let run = staged.run(&self.binary, self.timeout).map_err(|error| {
+            let message = format!("{VALIDATION_LAUNCH_FAILED}: {error}");
+            crate::logging::error("validation", &message);
+            message
+        })?;
+        let result = classify_validation_run(run.exit_success, &run.diagnostic);
+        match &result {
+            Ok(()) => {
+                crate::logging::info("validation", "isolated Codex validation accepted candidate")
+            }
+            Err(message) => crate::logging::error("validation", message),
+        }
+        result
     }
 }
 
@@ -265,6 +282,10 @@ fn stage_relative_model_catalog(
     }
 
     let destination = staged_codex_home.join(relative_path);
+    crate::logging::info(
+        "validation",
+        format!("staging relative model catalog {}", catalog_path.display()),
+    );
     if let Some(parent) = destination.parent() {
         create_private_dir(parent)?;
     }
