@@ -22,6 +22,7 @@ const VALIDATION_PROCESS_FAILED: &str = "Codex 配置校验器异常退出；未
 const VALIDATION_REFERENCE_MISSING: &str = "候选配置引用的本地文件不存在；未写入任何文件";
 const VALIDATION_REFERENCE_INVALID: &str = "候选配置引用的本地文件不安全或无法读取；未写入任何文件";
 const MAX_STAGED_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
+const VALIDATION_ARGUMENTS: &[&str] = &["app-server", "--listen", "stdio://"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationAvailability {
@@ -168,7 +169,7 @@ impl StagedCodexHome {
 
         let mut command = Command::new(binary);
         command
-            .args(["app-server", "--strict-config", "--listen", "stdio://"])
+            .args(VALIDATION_ARGUMENTS)
             .current_dir(&self.working_directory)
             .env("CODEX_HOME", &self.codex_home)
             .env("CODEX_SQLITE_HOME", &self.sqlite_home)
@@ -271,10 +272,13 @@ fn stage_relative_model_catalog(
 }
 
 fn classify_validation_run(exit_success: Option<bool>, diagnostic: &str) -> Result<(), String> {
+    if exit_success != Some(false) {
+        return Ok(());
+    }
     if diagnostic_indicates_config_rejection(diagnostic) {
         return Err(VALIDATION_REJECTED.to_owned());
     }
-    if exit_success == Some(false) && !diagnostic_indicates_expected_shutdown(diagnostic) {
+    if !diagnostic_indicates_expected_shutdown(diagnostic) {
         return Err(VALIDATION_PROCESS_FAILED.to_owned());
     }
     Ok(())
@@ -507,6 +511,18 @@ mod tests {
             classify_validation_run(
                 Some(false),
                 "app-server transport stopped: stdin reached EOF"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn validation_matches_normal_codex_tolerance_for_preserved_external_fields() {
+        assert!(!VALIDATION_ARGUMENTS.contains(&"--strict-config"));
+        assert!(
+            classify_validation_run(
+                Some(true),
+                "config.toml: unknown configuration field from another switcher"
             )
             .is_ok()
         );

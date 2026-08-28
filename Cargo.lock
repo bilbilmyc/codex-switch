@@ -874,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "codex-switch"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "directories",
