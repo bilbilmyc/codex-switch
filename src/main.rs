@@ -53,7 +53,7 @@ fn should_retry_with_software(mode: WindowsRenderMode, error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn windows_resource_id(id: u16) -> *const u16 {
     std::ptr::without_provenance(usize::from(id))
 }
