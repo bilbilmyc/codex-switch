@@ -1877,7 +1877,7 @@ fn spawn_context_update(
     thread::spawn(move || {
         let process_result = if quit_desktop {
             process::request_desktop_quit()
-                .and_then(|()| process::wait_until_clear(Duration::from_secs(8)))
+                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
                 .map_err(|error| error.to_string())
         } else {
             Ok(())
@@ -1984,7 +1984,7 @@ fn spawn_apply(
     thread::spawn(move || {
         let process_result = if quit_desktop {
             process::request_desktop_quit()
-                .and_then(|()| process::wait_until_clear(Duration::from_secs(8)))
+                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
                 .map_err(|error| error.to_string())
         } else {
             Ok(())
@@ -2115,7 +2115,7 @@ fn spawn_restore(
     thread::spawn(move || {
         let process_result = if quit_desktop {
             process::request_desktop_quit()
-                .and_then(|()| process::wait_until_clear(Duration::from_secs(8)))
+                .and_then(|()| process::wait_until_desktop_clear(Duration::from_secs(8)))
                 .map_err(|error| error.to_string())
         } else {
             Ok(())

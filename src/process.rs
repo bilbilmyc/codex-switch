@@ -32,6 +32,10 @@ impl ProcessReport {
         self.processes.is_empty()
     }
 
+    pub fn is_desktop_clear(&self) -> bool {
+        !self.has_desktop()
+    }
+
     pub fn has_desktop(&self) -> bool {
         self.processes
             .iter()
@@ -75,7 +79,7 @@ impl ProcessReport {
 pub enum ProcessError {
     #[error("could not ask Codex Desktop to quit: {0}")]
     Quit(String),
-    #[error("Codex processes did not exit before the timeout")]
+    #[error("Codex Desktop did not exit before the timeout")]
     ExitTimeout,
     #[error("could not restart Codex Desktop: {0}")]
     Relaunch(String),
@@ -177,10 +181,10 @@ fn request_desktop_quit_for(report: &ProcessReport) -> Result<(), ProcessError> 
     ))
 }
 
-pub fn wait_until_clear(timeout: Duration) -> Result<(), ProcessError> {
+pub fn wait_until_desktop_clear(timeout: Duration) -> Result<(), ProcessError> {
     let deadline = Instant::now() + timeout;
     loop {
-        if detect_codex_processes().is_clear() {
+        if detect_codex_processes().is_desktop_clear() {
             return Ok(());
         }
         if Instant::now() >= deadline {
@@ -396,5 +400,28 @@ mod tests {
             ],
         };
         assert_eq!(report.desktop_pids().collect::<Vec<_>>(), vec![11]);
+    }
+
+    #[test]
+    fn desktop_shutdown_completion_ignores_command_line_processes() {
+        let command_line_only = ProcessReport {
+            processes: vec![RunningCodexProcess {
+                pid: 12,
+                kind: ProcessKind::CommandLine,
+                label: String::new(),
+                executable: None,
+            }],
+        };
+        let desktop_running = ProcessReport {
+            processes: vec![RunningCodexProcess {
+                pid: 11,
+                kind: ProcessKind::Desktop,
+                label: String::new(),
+                executable: None,
+            }],
+        };
+
+        assert!(command_line_only.is_desktop_clear());
+        assert!(!desktop_running.is_desktop_clear());
     }
 }
