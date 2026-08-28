@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,9 @@ const VALIDATION_REJECTED: &str = "Codex 拒绝了候选配置；未写入任何
 const VALIDATION_SETUP_FAILED: &str = "无法准备隔离的 Codex 配置校验";
 const VALIDATION_LAUNCH_FAILED: &str = "无法启动隔离的 Codex 配置校验器";
 const VALIDATION_PROCESS_FAILED: &str = "Codex 配置校验器异常退出；未写入任何文件";
+const VALIDATION_REFERENCE_MISSING: &str = "候选配置引用的本地文件不存在；未写入任何文件";
+const VALIDATION_REFERENCE_INVALID: &str = "候选配置引用的本地文件不安全或无法读取；未写入任何文件";
+const MAX_STAGED_REFERENCE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValidationAvailability {
@@ -29,6 +32,7 @@ pub enum ValidationAvailability {
 #[derive(Clone, Debug)]
 pub struct CodexStagedValidator {
     binary: PathBuf,
+    source_codex_home: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -40,18 +44,26 @@ impl CodexStagedValidator {
     pub fn discover_for_desktop(desktop_executable: Option<&Path>) -> Option<Self> {
         let override_value = env::var_os(CODEX_BINARY_OVERRIDE);
         let path_value = env::var_os("PATH");
+        let source_codex_home = crate::paths::AppPaths::discover()
+            .ok()
+            .map(|paths| paths.codex_dir);
         discover_with_desktop(
             override_value.as_deref(),
             path_value.as_deref(),
             known_binaries(),
             desktop_executable,
         )
-        .map(Self::from_binary)
+        .map(|binary| Self {
+            binary,
+            source_codex_home,
+            timeout: DEFAULT_TIMEOUT,
+        })
     }
 
     pub fn from_binary(binary: impl Into<PathBuf>) -> Self {
         Self {
             binary: binary.into(),
+            source_codex_home: None,
             timeout: DEFAULT_TIMEOUT,
         }
     }
@@ -61,12 +73,26 @@ impl CodexStagedValidator {
     }
 
     fn validate_candidate(&self, config_toml: &str, auth_json: &[u8]) -> Result<(), String> {
-        let staged = StagedCodexHome::create(config_toml.as_bytes(), auth_json)
-            .map_err(|_| VALIDATION_SETUP_FAILED.to_owned())?;
+        let staged = StagedCodexHome::create(
+            config_toml.as_bytes(),
+            auth_json,
+            self.source_codex_home.as_deref(),
+        )
+        .map_err(|error| validation_setup_error(&error))?;
         let run = staged
             .run(&self.binary, self.timeout)
             .map_err(|error| format!("{VALIDATION_LAUNCH_FAILED}: {error}"))?;
         classify_validation_run(run.exit_success, &run.diagnostic)
+    }
+}
+
+fn validation_setup_error(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::NotFound => VALIDATION_REFERENCE_MISSING.to_owned(),
+        io::ErrorKind::InvalidInput | io::ErrorKind::InvalidData => {
+            VALIDATION_REFERENCE_INVALID.to_owned()
+        }
+        _ => VALIDATION_SETUP_FAILED.to_owned(),
     }
 }
 
@@ -102,7 +128,11 @@ struct ValidationRun {
 }
 
 impl StagedCodexHome {
-    fn create(config_toml: &[u8], auth_json: &[u8]) -> io::Result<Self> {
+    fn create(
+        config_toml: &[u8],
+        auth_json: &[u8],
+        source_codex_home: Option<&Path>,
+    ) -> io::Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("codex-switch-validate-")
             .tempdir()?;
@@ -116,6 +146,7 @@ impl StagedCodexHome {
         create_private_dir(&working_directory)?;
         write_private(&codex_home.join("config.toml"), config_toml)?;
         write_private(&codex_home.join("auth.json"), auth_json)?;
+        stage_relative_model_catalog(config_toml, source_codex_home, &codex_home)?;
 
         Ok(Self {
             _root: root,
@@ -170,6 +201,73 @@ impl StagedCodexHome {
             exit_success,
         })
     }
+}
+
+fn stage_relative_model_catalog(
+    config_toml: &[u8],
+    source_codex_home: Option<&Path>,
+    staged_codex_home: &Path,
+) -> io::Result<()> {
+    let Some(source_codex_home) = source_codex_home else {
+        return Ok(());
+    };
+    let Ok(config_toml) = std::str::from_utf8(config_toml) else {
+        return Ok(());
+    };
+    let Ok(document) = config_toml.parse::<toml_edit::DocumentMut>() else {
+        return Ok(());
+    };
+    let Some(catalog_path) = document
+        .get("model_catalog_json")
+        .and_then(toml_edit::Item::as_str)
+    else {
+        return Ok(());
+    };
+    let catalog_path = Path::new(catalog_path);
+    if catalog_path.is_absolute() {
+        return Ok(());
+    }
+
+    let mut relative_path = PathBuf::new();
+    for component in catalog_path.components() {
+        match component {
+            Component::Normal(component) => relative_path.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "model_catalog_json must remain within the Codex home",
+                ));
+            }
+        }
+    }
+    if relative_path.as_os_str().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "model_catalog_json is empty",
+        ));
+    }
+
+    let source = source_codex_home.join(&relative_path);
+    let metadata = fs::symlink_metadata(&source)?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "model_catalog_json must reference a regular file",
+        ));
+    }
+    if metadata.len() > MAX_STAGED_REFERENCE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model_catalog_json is too large to stage",
+        ));
+    }
+
+    let destination = staged_codex_home.join(relative_path);
+    if let Some(parent) = destination.parent() {
+        create_private_dir(parent)?;
+    }
+    write_private(&destination, &fs::read(source)?)
 }
 
 fn classify_validation_run(exit_success: Option<bool>, diagnostic: &str) -> Result<(), String> {
@@ -430,6 +528,54 @@ mod tests {
     }
 
     #[test]
+    fn staged_home_copies_a_relative_model_catalog_from_the_live_codex_home() {
+        let source = tempfile::tempdir().unwrap();
+        let catalog = source.path().join("model-catalogs/relay-generated.json");
+        fs::create_dir_all(catalog.parent().unwrap()).unwrap();
+        fs::write(&catalog, br#"{"models":[{"slug":"relay-model"}]}"#).unwrap();
+        let config = r#"
+model_catalog_json = "model-catalogs/relay-generated.json"
+"#;
+
+        let staged =
+            StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path())).unwrap();
+
+        assert_eq!(
+            fs::read(
+                staged
+                    .codex_home
+                    .join("model-catalogs/relay-generated.json")
+            )
+            .unwrap(),
+            fs::read(catalog).unwrap()
+        );
+    }
+
+    #[test]
+    fn staged_home_rejects_a_model_catalog_that_escapes_the_codex_home() {
+        let source = tempfile::tempdir().unwrap();
+        let config = r#"model_catalog_json = "../outside.json""#;
+
+        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()))
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn staged_home_reports_a_missing_relative_model_catalog() {
+        let source = tempfile::tempdir().unwrap();
+        let config = r#"model_catalog_json = "model-catalogs/missing.json""#;
+
+        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()))
+            .err()
+            .unwrap();
+
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
     fn explicit_override_is_authoritative() {
         let directory = tempfile::tempdir().unwrap();
         let override_binary = directory.path().join("override-codex");
@@ -489,6 +635,7 @@ mod tests {
         let staged = StagedCodexHome::create(
             b"model = \"gpt-test\"\n",
             br#"{"OPENAI_API_KEY":"sk-test"}"#,
+            None,
         )
         .unwrap();
         assert!(staged.codex_home.join("config.toml").is_file());
