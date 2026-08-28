@@ -53,6 +53,11 @@ fn should_retry_with_software(mode: WindowsRenderMode, error: &str) -> bool {
     .any(|marker| error.contains(marker))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_resource_id(id: u16) -> *const u16 {
+    std::ptr::without_provenance(usize::from(id))
+}
+
 fn main() {
     let result: Result<(), Box<dyn std::error::Error>> = configure_platform().map_err(Into::into);
     if let Err(error) = result.and_then(|()| codex_switch::app::run()) {
@@ -120,7 +125,7 @@ mod tests {
 
     use super::{
         SOFTWARE_RENDERER_NAME, WindowsRenderMode, should_retry_with_software, windows_render_mode,
-        windows_renderer_name,
+        windows_renderer_name, windows_resource_id,
     };
 
     #[test]
@@ -172,10 +177,15 @@ mod tests {
 
         let module = unsafe { GetModuleHandleW(std::ptr::null()) };
         assert!(!module.is_null());
-        let icon = unsafe { LoadIconW(module, 1_usize as *const u16) };
+        let icon = unsafe { LoadIconW(module, windows_resource_id(1)) };
         assert!(
             !icon.is_null(),
             "Windows executable has no icon resource #1"
         );
+    }
+
+    #[test]
+    fn windows_icon_resource_id_remains_one() {
+        assert_eq!(windows_resource_id(1).addr(), 1);
     }
 }
