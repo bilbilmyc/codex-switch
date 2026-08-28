@@ -376,9 +376,10 @@ mod tests {
     #[test]
     fn discovery_falls_back_from_known_location_to_path() {
         let directory = tempfile::tempdir().unwrap();
-        let path_binary = directory
-            .path()
-            .join(executable_names_for_platform(OsStr::new("codex"), false)[0].clone());
+        let path_binary = directory.path().join(
+            executable_names_for_platform(OsStr::new("codex"), cfg!(target_os = "windows"))[0]
+                .clone(),
+        );
         make_executable(&path_binary);
         let path = env::join_paths([directory.path()]).unwrap();
 
