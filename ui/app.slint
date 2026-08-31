@@ -108,7 +108,7 @@ component IconButton inherits Rectangle {
     Tooltip { text: @markdown("\{root.accessible-name}"); }
 }
 
-// Hallmark · component: destructive action · genre: modern-minimal · theme: graphite/coral
+// Destructive action with the same neutral and blue visual language as the rest of the app.
 // Stable geometry across default, hover, focus, active, and disabled states.
 component DangerActionButton inherits Rectangle {
     in property <image> icon;
@@ -274,12 +274,12 @@ component CommandButton inherits Rectangle {
     border-radius: Tokens.radius-md;
     border-width: 1px;
     border-color: !root.enabled ? Tokens.rule
-        : root.primary ? (root.danger ? Tokens.danger : Tokens.ink)
+        : root.primary ? (root.danger ? Tokens.danger : Tokens.accent)
         : root.danger ? Tokens.danger
         : Tokens.rule-strong;
     background: !root.enabled ? Tokens.surface-raised
         : root.primary && root.danger ? (touch.pressed ? Tokens.danger-hover : Tokens.danger)
-        : root.primary ? (touch.pressed ? Tokens.ink : touch.has-hover ? Tokens.ink-secondary : Tokens.ink)
+        : root.primary ? (touch.pressed ? Tokens.accent-hover : Tokens.accent)
         : touch.pressed ? Tokens.surface-pressed
         : touch.has-hover ? Tokens.surface-hover
         : Tokens.surface;
@@ -502,8 +502,8 @@ component ToggleRow inherits Rectangle {
                 height: 16px;
                 border-radius: Tokens.radius-sm;
                 border-width: 1px;
-                border-color: root.checked ? Tokens.ink : Tokens.rule-strong;
-                background: root.checked ? Tokens.ink : Tokens.field;
+                border-color: root.checked ? Tokens.accent : Tokens.rule-strong;
+                background: root.checked ? Tokens.accent : Tokens.field;
 
                 if root.checked: Image {
                     x: 2px;
@@ -706,7 +706,7 @@ component SectionLabel inherits Text {
     height: 20px;
     color: Tokens.ink;
     font-size: Tokens.text-base;
-    font-weight: 700;
+    font-weight: 600;
     horizontal-alignment: left;
     vertical-alignment: center;
 }
@@ -780,7 +780,7 @@ component NavTab inherits Rectangle {
         text: root.text;
         color: root.selected ? Tokens.ink : Tokens.muted;
         font-size: Tokens.text-base;
-        font-weight: root.selected ? 700 : 600;
+        font-weight: root.selected ? 600 : 500;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -825,7 +825,7 @@ component SegmentButton inherits Rectangle {
     height: 30px;
     horizontal-stretch: 1;
     border-radius: Tokens.radius-md;
-    background: root.selected ? Tokens.ink
+    background: root.selected ? Tokens.accent
         : touch.pressed ? Tokens.surface-pressed
         : touch.has-hover ? Tokens.surface-hover
         : Tokens.transparent;
@@ -838,7 +838,7 @@ component SegmentButton inherits Rectangle {
         text: root.text;
         color: root.selected ? Tokens.accent-ink : Tokens.ink-secondary;
         font-size: Tokens.text-sm;
-        font-weight: root.selected ? 700 : 500;
+        font-weight: root.selected ? 600 : 500;
         horizontal-alignment: center;
         vertical-alignment: center;
         overflow: elide;
@@ -1258,7 +1258,7 @@ export component AppWindow inherits Window {
     in property <int> usage-calls-delta-tone: 0;
     in property <string> usage-period-total-label: "";
     in property <string> usage-period-models-label: "";
-    in property <string> usage-trend-label: "今日用量趋势 · 红=输入 / 深灰=输出 · 各自按峰值缩放";
+    in property <string> usage-trend-label: "今日用量趋势 · 蓝=输入 / 深灰=输出 · 各自按峰值缩放";
     in property <string> usage-trend-unit-label: "单小时";
     in property <string> usage-total-input: "0";
     in property <string> usage-total-cached: "0";

@@ -2772,9 +2772,9 @@ fn usage_period_models_label(period: UsagePeriod) -> &'static str {
 
 fn usage_trend_label(period: UsagePeriod) -> &'static str {
     match period {
-        UsagePeriod::Today => "今日用量趋势 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
-        UsagePeriod::Last7Days => "每日用量趋势 · 近 7 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
-        UsagePeriod::Last30Days => "每日用量趋势 · 近 30 天 · 红=输入 / 深灰=输出 · 各自按峰值缩放",
+        UsagePeriod::Today => "今日用量趋势 · 蓝=输入 / 深灰=输出 · 各自按峰值缩放",
+        UsagePeriod::Last7Days => "每日用量趋势 · 近 7 天 · 蓝=输入 / 深灰=输出 · 各自按峰值缩放",
+        UsagePeriod::Last30Days => "每日用量趋势 · 近 30 天 · 蓝=输入 / 深灰=输出 · 各自按峰值缩放",
     }
 }
 
@@ -2975,7 +2975,8 @@ mod tests {
         pixels: &SharedPixelBuffer<Rgb8Pixel>,
         minimum_width: u32,
     ) -> Vec<(u32, u32, u32)> {
-        const CONTROL_RULE: (u8, u8, u8) = (154, 147, 138);
+        // Keep this in sync with Tokens.control-rule in ui/tokens.slint.
+        const CONTROL_RULE: (u8, u8, u8) = (174, 189, 205);
         let width = pixels.width();
         let mut edges = Vec::new();
 
