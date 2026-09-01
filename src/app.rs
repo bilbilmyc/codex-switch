@@ -279,13 +279,27 @@ enum ContextWorkerResult {
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+    run_with_instance_lock_timeout(std::time::Duration::ZERO)
+}
+
+pub fn run_with_instance_lock_timeout(
+    instance_lock_timeout: std::time::Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
     let paths = AppPaths::discover()?;
     if let Err(error) = logging::initialize(&paths) {
         eprintln!("Codex Switch could not initialize diagnostic logging: {error}");
     }
-    logging::info("startup", "initializing application state");
+    logging::info(
+        "startup",
+        format!(
+            "initializing application state pid={} instance_lock_wait_ms={}",
+            std::process::id(),
+            instance_lock_timeout.as_millis()
+        ),
+    );
     durable_fs::ensure_private_dir(&paths.tool_dir)?;
-    let instance_lock = durable_fs::acquire_lock(&paths.instance_lock)?;
+    let instance_lock =
+        durable_fs::acquire_lock_with_timeout(&paths.instance_lock, instance_lock_timeout)?;
     durable_fs::ensure_private_dir(&paths.model_cache_dir)?;
     durable_fs::ensure_private_dir(&paths.backups_dir)?;
 

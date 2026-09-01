@@ -54,6 +54,24 @@ pub fn acquire_lock(path: &Path) -> Result<ExclusiveLock, DurableFsError> {
     Ok(ExclusiveLock { _file: file })
 }
 
+pub fn acquire_lock_with_timeout(
+    path: &Path,
+    timeout: std::time::Duration,
+) -> Result<ExclusiveLock, DurableFsError> {
+    let started = std::time::Instant::now();
+    let retry_interval = std::time::Duration::from_millis(50);
+
+    loop {
+        match acquire_lock(path) {
+            Err(DurableFsError::AlreadyLocked) if started.elapsed() < timeout => {
+                let remaining = timeout.saturating_sub(started.elapsed());
+                std::thread::sleep(retry_interval.min(remaining));
+            }
+            result => return result,
+        }
+    }
+}
+
 pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, DurableFsError> {
     match fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
@@ -273,6 +291,35 @@ fn io_error(path: &Path, source: io::Error) -> DurableFsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lock_handoff_waits_for_the_previous_holder_to_exit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("handoff.lock");
+        let held = acquire_lock(&path).unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(75));
+            drop(held);
+        });
+
+        let acquired = acquire_lock_with_timeout(&path, std::time::Duration::from_secs(1)).unwrap();
+
+        drop(acquired);
+        releaser.join().unwrap();
+    }
+
+    #[test]
+    fn lock_handoff_still_rejects_a_persistent_second_instance() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("persistent.lock");
+        let _held = acquire_lock(&path).unwrap();
+
+        let error = acquire_lock_with_timeout(&path, std::time::Duration::from_millis(75))
+            .err()
+            .unwrap();
+
+        assert!(matches!(error, DurableFsError::AlreadyLocked));
+    }
 
     #[test]
     fn atomic_write_replaces_contents() {

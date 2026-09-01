@@ -7,6 +7,8 @@
 const SOFTWARE_RENDERER_ENV: &str = "CODEX_SWITCH_SOFTWARE_RENDERER";
 #[cfg(any(target_os = "windows", test))]
 const SOFTWARE_RENDERER_NAME: &str = "software";
+#[cfg(any(target_os = "windows", test))]
+const SOFTWARE_RELAUNCH_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 #[cfg(any(target_os = "windows", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,9 +60,27 @@ fn windows_resource_id(id: u16) -> *const u16 {
     std::ptr::without_provenance(usize::from(id))
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn instance_lock_timeout(mode: WindowsRenderMode) -> std::time::Duration {
+    match mode {
+        WindowsRenderMode::HardwarePreferred => std::time::Duration::ZERO,
+        WindowsRenderMode::SoftwareFallback => SOFTWARE_RELAUNCH_LOCK_WAIT,
+    }
+}
+
 fn main() {
     let result: Result<(), Box<dyn std::error::Error>> = configure_platform().map_err(Into::into);
-    if let Err(error) = result.and_then(|()| codex_switch::app::run()) {
+    if let Err(error) = result.and_then(|()| {
+        #[cfg(target_os = "windows")]
+        {
+            let mode = windows_render_mode(std::env::var_os(SOFTWARE_RENDERER_ENV).as_deref());
+            codex_switch::app::run_with_instance_lock_timeout(instance_lock_timeout(mode))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            codex_switch::app::run()
+        }
+    }) {
         let error_message = error.to_string();
         #[cfg(target_os = "windows")]
         let error_message = {
@@ -125,7 +145,8 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
-        SOFTWARE_RENDERER_NAME, WindowsRenderMode, should_retry_with_software, windows_render_mode,
+        SOFTWARE_RELAUNCH_LOCK_WAIT, SOFTWARE_RENDERER_NAME, WindowsRenderMode,
+        instance_lock_timeout, should_retry_with_software, windows_render_mode,
         windows_renderer_name, windows_resource_id,
     };
 
@@ -160,6 +181,18 @@ mod tests {
             WindowsRenderMode::HardwarePreferred,
             "profile file contains invalid TOML",
         ));
+    }
+
+    #[test]
+    fn software_fallback_waits_for_the_hardware_process_lock_handoff() {
+        assert_eq!(
+            instance_lock_timeout(WindowsRenderMode::HardwarePreferred),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            instance_lock_timeout(WindowsRenderMode::SoftwareFallback),
+            SOFTWARE_RELAUNCH_LOCK_WAIT
+        );
     }
 
     #[test]
