@@ -151,6 +151,16 @@ pub fn patch_codex_config(
     })
 }
 
+pub fn patch_model_catalog_path(
+    raw: &str,
+    relative_path: &str,
+) -> Result<String, CodexConfigError> {
+    validate_text("model catalog path", relative_path)?;
+    let mut document = parse_document(raw)?;
+    set_string_preserving_decor(document.as_table_mut(), "model_catalog_json", relative_path)?;
+    Ok(document.to_string())
+}
+
 pub fn inspect_context_settings(raw: &str) -> Result<ContextSettings, CodexConfigError> {
     let document = parse_document(raw)?;
     inspect_context_document(document.as_table())
@@ -1053,6 +1063,21 @@ requires_openai_auth = true
 
         assert_eq!(profile.id, profile_id);
         assert_eq!(provider_id_for_profile(profile.id), provider_id);
+    }
+
+    #[test]
+    fn patches_model_catalog_path_without_discarding_other_configuration() {
+        let patched = patch_model_catalog_path(
+            "# keep\nmodel = \"gpt-5\"\nmodel_catalog_json = \"old.json\"\n",
+            "model-catalogs/codex-switch-models.json",
+        )
+        .unwrap();
+
+        assert!(patched.contains("# keep"));
+        assert!(patched.contains("model = \"gpt-5\""));
+        assert!(
+            patched.contains("model_catalog_json = \"model-catalogs/codex-switch-models.json\"")
+        );
     }
 
     #[test]

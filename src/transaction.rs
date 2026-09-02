@@ -19,6 +19,7 @@ use crate::domain::{Activation, ProfileId};
 use crate::durable_fs::{self, DurableFsError};
 use crate::legacy_usage::{LegacyUsageHistory, LegacyUsageObservation};
 use crate::paths::AppPaths;
+use crate::{codex_config::patch_model_catalog_path, model_catalog};
 
 const TRANSACTION_SCHEMA_VERSION: u32 = 1;
 const STATE_SCHEMA_VERSION: u32 = 1;
@@ -28,6 +29,7 @@ const BACKUP_MANIFEST_FILE: &str = "manifest.json";
 const BACKUP_CONFIG_FILE: &str = "config.toml";
 const BACKUP_AUTH_FILE: &str = "auth.json";
 const BACKUP_STATE_FILE: &str = "state.json";
+const BACKUP_CATALOG_FILE: &str = "model-catalog.json";
 const BACKUP_STAGING_PREFIX: &str = ".staging-";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,7 +101,12 @@ pub struct RestoreOutcome {
 }
 
 pub trait StagedValidator {
-    fn validate(&self, config_toml: &str, auth_json: &[u8]) -> Result<(), String>;
+    fn validate(
+        &self,
+        config_toml: &str,
+        auth_json: &[u8],
+        model_catalog: Option<&[u8]>,
+    ) -> Result<(), String>;
 }
 
 #[derive(Debug)]
@@ -189,14 +196,30 @@ impl TransactionManager {
             )));
         }
 
-        let patched_config = patch_codex_config(current_config, activation)?;
+        let existing_catalog = current.catalog.as_deref();
+        let generated_catalog =
+            model_catalog::merge_supported_model(existing_catalog, &activation.model)
+                .map_err(TransactionError::ModelCatalog)?;
+        let generated_catalog_changed = generated_catalog.is_some();
+        let managed_catalog = generated_catalog.or_else(|| current.catalog.clone());
+        let mut patched_config = patch_codex_config(current_config, activation)?;
+        if generated_catalog_changed {
+            patched_config.contents = patch_model_catalog_path(
+                &patched_config.contents,
+                model_catalog::MANAGED_CATALOG_RELATIVE_PATH,
+            )?;
+        }
         let patched_auth = patch_auth_json(current.auth.as_deref(), &activation.api_key)?;
         let target_fingerprint =
             relevant_fingerprint(&patched_config.contents, Some(patched_auth.as_slice()))?;
 
         if let Some(validator) = validator {
             validator
-                .validate(&patched_config.contents, &patched_auth)
+                .validate(
+                    &patched_config.contents,
+                    &patched_auth,
+                    managed_catalog.as_deref(),
+                )
                 .map_err(TransactionError::StagedValidation)?;
         }
 
@@ -209,6 +232,7 @@ impl TransactionManager {
             config: Some(patched_config.contents.into_bytes()),
             auth: Some(patched_auth),
             state: Some(serialize_json(&state)?),
+            catalog: managed_catalog,
         };
         let backup = self.commit_snapshot(
             TransactionOperation::Apply {
@@ -266,7 +290,7 @@ impl TransactionManager {
         let patched_config = patch_context_settings(current_config, settings)?;
         if let (Some(validator), Some(auth)) = (validator, current.auth.as_deref()) {
             validator
-                .validate(&patched_config, auth)
+                .validate(&patched_config, auth, None)
                 .map_err(TransactionError::StagedValidation)?;
         }
         let target_state = current_state
@@ -280,6 +304,7 @@ impl TransactionManager {
             config: Some(patched_config.into_bytes()),
             auth: current.auth.clone(),
             state: target_state,
+            catalog: current.catalog.clone(),
         };
         self.commit_snapshot(TransactionOperation::UpdateContext, &current, &target)
     }
@@ -365,6 +390,7 @@ impl TransactionManager {
             config: source.config,
             auth: source.auth,
             state: Some(serialize_json(&state)?),
+            catalog: source.catalog,
         };
         let current = self.read_live_snapshot()?;
         let rollback_backup = self.commit_snapshot(
@@ -444,6 +470,8 @@ impl TransactionManager {
         durable_fs::atomic_write(&self.paths.journal, &serialize_json(&journal)?)?;
 
         let commit_result = (|| {
+            write_optional(&self.paths.managed_model_catalog, target.catalog.as_deref())?;
+            self.maybe_fail(TestFailurePoint::Catalog)?;
             write_optional(&self.paths.codex_config, target.config.as_deref())?;
             self.maybe_fail(TestFailurePoint::Config)?;
             write_optional(&self.paths.codex_auth, target.auth.as_deref())?;
@@ -477,10 +505,12 @@ impl TransactionManager {
         ensure_safe_file_target(&self.paths.codex_config)?;
         ensure_safe_file_target(&self.paths.codex_auth)?;
         ensure_safe_file_target(&self.paths.state)?;
+        ensure_safe_file_target(&self.paths.managed_model_catalog)?;
         Ok(Snapshot {
             config: durable_fs::read_optional(&self.paths.codex_config)?,
             auth: durable_fs::read_optional(&self.paths.codex_auth)?,
             state: durable_fs::read_optional(&self.paths.state)?,
+            catalog: durable_fs::read_optional(&self.paths.managed_model_catalog)?,
         })
     }
 
@@ -526,6 +556,10 @@ impl TransactionManager {
     }
 
     fn restore_snapshot(&self, snapshot: &Snapshot) -> Result<(), TransactionError> {
+        write_optional(
+            &self.paths.managed_model_catalog,
+            snapshot.catalog.as_deref(),
+        )?;
         write_optional(&self.paths.codex_config, snapshot.config.as_deref())?;
         write_optional(&self.paths.codex_auth, snapshot.auth.as_deref())?;
         write_optional(&self.paths.state, snapshot.state.as_deref())?;
@@ -569,6 +603,10 @@ impl TransactionManager {
                 &directory.join(BACKUP_STATE_FILE),
                 snapshot.state.as_deref(),
             )?;
+            write_backup_file(
+                &directory.join(BACKUP_CATALOG_FILE),
+                snapshot.catalog.as_deref(),
+            )?;
             let manifest = BackupManifest {
                 schema_version: BACKUP_SCHEMA_VERSION,
                 id,
@@ -576,6 +614,7 @@ impl TransactionManager {
                 config: StoredFile::from_contents(snapshot.config.as_deref()),
                 auth: StoredFile::from_contents(snapshot.auth.as_deref()),
                 state: StoredFile::from_contents(snapshot.state.as_deref()),
+                catalog: StoredFile::from_contents(snapshot.catalog.as_deref()),
             };
             durable_fs::atomic_write(
                 &directory.join(BACKUP_MANIFEST_FILE),
@@ -682,6 +721,7 @@ impl TransactionManager {
             config: read_backup_file(id, &directory.join(BACKUP_CONFIG_FILE), &manifest.config)?,
             auth: read_backup_file(id, &directory.join(BACKUP_AUTH_FILE), &manifest.auth)?,
             state: read_backup_file(id, &directory.join(BACKUP_STATE_FILE), &manifest.state)?,
+            catalog: read_backup_file(id, &directory.join(BACKUP_CATALOG_FILE), &manifest.catalog)?,
         })
     }
 
@@ -811,6 +851,7 @@ struct Snapshot {
     config: Option<Vec<u8>>,
     auth: Option<Vec<u8>>,
     state: Option<Vec<u8>>,
+    catalog: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -837,6 +878,7 @@ struct StagedBackup {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestFailurePoint {
+    Catalog,
     Config,
     Auth,
     State,
@@ -857,6 +899,8 @@ struct BackupManifest {
     config: StoredFile,
     auth: StoredFile,
     state: StoredFile,
+    #[serde(default)]
+    catalog: StoredFile,
 }
 
 impl BackupManifest {
@@ -889,7 +933,7 @@ impl From<&BackupManifest> for BackupSummary {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredFile {
     present: bool,
@@ -1131,6 +1175,8 @@ pub enum TransactionError {
     FileSystem(#[from] DurableFsError),
     #[error(transparent)]
     CodexConfig(#[from] CodexConfigError),
+    #[error("managed model catalog error: {0}")]
+    ModelCatalog(String),
     #[error(transparent)]
     ExternalConflict(Box<ExternalConflict>),
     #[error("Codex config is not valid UTF-8: {path}")]
@@ -1625,10 +1671,66 @@ requires_openai_auth = true
         assert_eq!(manager.list_backups().unwrap().len(), MAX_BACKUPS);
     }
 
+    #[test]
+    fn applying_a_supported_model_writes_and_references_the_managed_catalog() {
+        let (_temp, paths, manager) = fixture();
+
+        manager
+            .apply(&activation("glm-5.3"), ConflictPolicy::Reject)
+            .unwrap();
+
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(
+            config.contains("model_catalog_json = \"model-catalogs/codex-switch-models.json\"")
+        );
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "glm-5.3");
+    }
+
+    #[test]
+    fn restoring_a_backup_removes_a_catalog_created_by_a_supported_model() {
+        let (_temp, paths, manager) = fixture();
+
+        manager
+            .apply(&activation("glm-5.3"), ConflictPolicy::Reject)
+            .unwrap();
+        assert!(paths.managed_model_catalog.exists());
+
+        manager.restore_latest().unwrap();
+
+        assert!(!paths.managed_model_catalog.exists());
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!config.contains("codex-switch-models.json"));
+    }
+
+    #[test]
+    fn switching_to_an_unsupported_model_keeps_the_existing_managed_catalog() {
+        let (_temp, paths, manager) = fixture();
+
+        manager
+            .apply(&activation("glm-5.3"), ConflictPolicy::Reject)
+            .unwrap();
+        manager
+            .apply(&activation("gpt-5.6-sol"), ConflictPolicy::Reject)
+            .unwrap();
+
+        assert!(paths.managed_model_catalog.exists());
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(
+            config.contains("model_catalog_json = \"model-catalogs/codex-switch-models.json\"")
+        );
+    }
+
     struct RejectingValidator;
 
     impl StagedValidator for RejectingValidator {
-        fn validate(&self, _config_toml: &str, _auth_json: &[u8]) -> Result<(), String> {
+        fn validate(
+            &self,
+            _config_toml: &str,
+            _auth_json: &[u8],
+            _model_catalog: Option<&[u8]>,
+        ) -> Result<(), String> {
             Err("strict parser rejected the staged files".to_owned())
         }
     }
@@ -1660,7 +1762,12 @@ requires_openai_auth = true
     }
 
     impl StagedValidator for MutatingValidator {
-        fn validate(&self, _config_toml: &str, _auth_json: &[u8]) -> Result<(), String> {
+        fn validate(
+            &self,
+            _config_toml: &str,
+            _auth_json: &[u8],
+            _model_catalog: Option<&[u8]>,
+        ) -> Result<(), String> {
             durable_fs::atomic_write(&self.config_path, &self.config_contents).unwrap();
             durable_fs::atomic_write(&self.auth_path, &self.auth_contents).unwrap();
             Ok(())

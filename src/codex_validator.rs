@@ -73,7 +73,12 @@ impl CodexStagedValidator {
         &self.binary
     }
 
-    fn validate_candidate(&self, config_toml: &str, auth_json: &[u8]) -> Result<(), String> {
+    fn validate_candidate(
+        &self,
+        config_toml: &str,
+        auth_json: &[u8],
+        model_catalog: Option<&[u8]>,
+    ) -> Result<(), String> {
         crate::logging::info(
             "validation",
             "preparing isolated Codex configuration validation",
@@ -82,6 +87,7 @@ impl CodexStagedValidator {
             config_toml.as_bytes(),
             auth_json,
             self.source_codex_home.as_deref(),
+            model_catalog,
         )
         .map_err(|error| {
             let message = validation_setup_error(&error);
@@ -115,8 +121,13 @@ fn validation_setup_error(error: &io::Error) -> String {
 }
 
 impl StagedValidator for CodexStagedValidator {
-    fn validate(&self, config_toml: &str, auth_json: &[u8]) -> Result<(), String> {
-        self.validate_candidate(config_toml, auth_json)
+    fn validate(
+        &self,
+        config_toml: &str,
+        auth_json: &[u8],
+        model_catalog: Option<&[u8]>,
+    ) -> Result<(), String> {
+        self.validate_candidate(config_toml, auth_json, model_catalog)
     }
 }
 
@@ -127,7 +138,7 @@ pub fn validate_if_available(
     let Some(validator) = CodexStagedValidator::discover() else {
         return Ok(ValidationAvailability::SkippedNoCodexBinary);
     };
-    validator.validate(config_toml, auth_json)?;
+    validator.validate(config_toml, auth_json, None)?;
     Ok(ValidationAvailability::Validated)
 }
 
@@ -150,6 +161,7 @@ impl StagedCodexHome {
         config_toml: &[u8],
         auth_json: &[u8],
         source_codex_home: Option<&Path>,
+        model_catalog: Option<&[u8]>,
     ) -> io::Result<Self> {
         let root = tempfile::Builder::new()
             .prefix("codex-switch-validate-")
@@ -164,7 +176,7 @@ impl StagedCodexHome {
         create_private_dir(&working_directory)?;
         write_private(&codex_home.join("config.toml"), config_toml)?;
         write_private(&codex_home.join("auth.json"), auth_json)?;
-        stage_relative_model_catalog(config_toml, source_codex_home, &codex_home)?;
+        stage_relative_model_catalog(config_toml, source_codex_home, &codex_home, model_catalog)?;
 
         Ok(Self {
             _root: root,
@@ -225,10 +237,8 @@ fn stage_relative_model_catalog(
     config_toml: &[u8],
     source_codex_home: Option<&Path>,
     staged_codex_home: &Path,
+    candidate_catalog: Option<&[u8]>,
 ) -> io::Result<()> {
-    let Some(source_codex_home) = source_codex_home else {
-        return Ok(());
-    };
     let Ok(config_toml) = std::str::from_utf8(config_toml) else {
         return Ok(());
     };
@@ -266,21 +276,49 @@ fn stage_relative_model_catalog(
         ));
     }
 
-    let source = source_codex_home.join(&relative_path);
-    let metadata = fs::symlink_metadata(&source)?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "model_catalog_json must reference a regular file",
-        ));
-    }
-    if metadata.len() > MAX_STAGED_REFERENCE_BYTES {
+    let contents = match candidate_catalog {
+        Some(contents) => contents,
+        None => {
+            let Some(source_codex_home) = source_codex_home else {
+                return Ok(());
+            };
+            let source = source_codex_home.join(&relative_path);
+            let metadata = fs::symlink_metadata(&source)?;
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "model_catalog_json must reference a regular file",
+                ));
+            }
+            if metadata.len() > MAX_STAGED_REFERENCE_BYTES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "model_catalog_json is too large to stage",
+                ));
+            }
+            return stage_catalog_contents(
+                &relative_path,
+                catalog_path,
+                staged_codex_home,
+                &fs::read(source)?,
+            );
+        }
+    };
+    if contents.len() as u64 > MAX_STAGED_REFERENCE_BYTES {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "model_catalog_json is too large to stage",
+            "candidate model catalog is too large to stage",
         ));
     }
+    stage_catalog_contents(&relative_path, catalog_path, staged_codex_home, contents)
+}
 
+fn stage_catalog_contents(
+    relative_path: &Path,
+    catalog_path: &Path,
+    staged_codex_home: &Path,
+    contents: &[u8],
+) -> io::Result<()> {
     let destination = staged_codex_home.join(relative_path);
     crate::logging::info(
         "validation",
@@ -289,7 +327,7 @@ fn stage_relative_model_catalog(
     if let Some(parent) = destination.parent() {
         create_private_dir(parent)?;
     }
-    write_private(&destination, &fs::read(source)?)
+    write_private(&destination, contents)
 }
 
 fn classify_validation_run(exit_success: Option<bool>, diagnostic: &str) -> Result<(), String> {
@@ -575,7 +613,7 @@ model_catalog_json = "model-catalogs/relay-generated.json"
 "#;
 
         let staged =
-            StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path())).unwrap();
+            StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()), None).unwrap();
 
         assert_eq!(
             fs::read(
@@ -593,7 +631,7 @@ model_catalog_json = "model-catalogs/relay-generated.json"
         let source = tempfile::tempdir().unwrap();
         let config = r#"model_catalog_json = "../outside.json""#;
 
-        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()))
+        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()), None)
             .err()
             .unwrap();
 
@@ -605,7 +643,7 @@ model_catalog_json = "model-catalogs/relay-generated.json"
         let source = tempfile::tempdir().unwrap();
         let config = r#"model_catalog_json = "model-catalogs/missing.json""#;
 
-        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()))
+        let error = StagedCodexHome::create(config.as_bytes(), b"{}", Some(source.path()), None)
             .err()
             .unwrap();
 
@@ -672,6 +710,7 @@ model_catalog_json = "model-catalogs/relay-generated.json"
         let staged = StagedCodexHome::create(
             b"model = \"gpt-test\"\n",
             br#"{"OPENAI_API_KEY":"sk-test"}"#,
+            None,
             None,
         )
         .unwrap();

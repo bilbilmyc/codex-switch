@@ -28,6 +28,7 @@ pub struct AppPaths {
     pub lock: PathBuf,
     pub logs_dir: PathBuf,
     pub model_cache_dir: PathBuf,
+    pub managed_model_catalog: PathBuf,
     pub usage_database: PathBuf,
     pub backups_dir: PathBuf,
 }
@@ -55,6 +56,7 @@ impl AppPaths {
             lock: tool_dir.join(".lock"),
             logs_dir: tool_dir.join("logs"),
             model_cache_dir: tool_dir.join("model-cache"),
+            managed_model_catalog: codex_dir.join("model-catalogs/codex-switch-models.json"),
             usage_database: tool_dir.join("usage.sqlite3"),
             backups_dir: tool_dir.join("backups"),
             home_dir,
@@ -130,6 +132,10 @@ mod tests {
                 uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
             )),
             home.join(".codex-switch/model-cache/00000000-0000-4000-8000-000000000001.json")
+        );
+        assert_eq!(
+            paths.managed_model_catalog,
+            home.join(".codex/model-catalogs/codex-switch-models.json")
         );
     }
 
