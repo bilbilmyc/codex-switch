@@ -15,7 +15,7 @@ use crate::codex_config::{
     patch_auth_json, patch_codex_config, patch_context_settings, pre_context_relevant_fingerprint,
     relevant_fingerprint, relevant_projection,
 };
-use crate::domain::{Activation, ProfileId};
+use crate::domain::{Activation, ProfileContext, ProfileId};
 use crate::durable_fs::{self, DurableFsError};
 use crate::legacy_usage::{LegacyUsageHistory, LegacyUsageObservation};
 use crate::paths::AppPaths;
@@ -180,9 +180,11 @@ impl TransactionManager {
 
         let current = self.read_live_snapshot()?;
         let current_config = config_text(&self.paths.codex_config, current.config.as_deref())?;
-        let actual_projection = relevant_projection(current_config, current.auth.as_deref())?;
-        let actual_fingerprint = relevant_fingerprint(current_config, current.auth.as_deref())?;
-
+        let (actual_projection, actual_fingerprint) = current_relevant_state(
+            current_config,
+            current.auth.as_deref(),
+            activation.context == Some(ProfileContext::default()),
+        )?;
         if policy == ConflictPolicy::Reject
             && let Some(state) = self.load_state_locked()?
             && !state_fingerprint_matches(&state, &actual_fingerprint, &actual_projection)?
@@ -271,9 +273,12 @@ impl TransactionManager {
 
         let current = self.read_live_snapshot()?;
         let current_config = config_text(&self.paths.codex_config, current.config.as_deref())?;
-        let actual_projection = relevant_projection(current_config, current.auth.as_deref())?;
-        let actual_fingerprint = relevant_fingerprint(current_config, current.auth.as_deref())?;
         let current_state = deserialize_state(current.state.as_deref())?;
+        let (actual_projection, actual_fingerprint) = current_relevant_state(
+            current_config,
+            current.auth.as_deref(),
+            settings == ContextSettings::default(),
+        )?;
         if policy == ConflictPolicy::Reject
             && let Some(state) = &current_state
             && !state_fingerprint_matches(state, &actual_fingerprint, &actual_projection)?
@@ -1023,6 +1028,31 @@ fn state_fingerprint_matches(
     Ok(state.relevant_fingerprint == pre_context_relevant_fingerprint(actual_projection)?)
 }
 
+fn current_relevant_state(
+    config: &str,
+    auth: Option<&[u8]>,
+    allow_default_context_fallback: bool,
+) -> Result<(RelevantProjection, String), TransactionError> {
+    match projection_and_fingerprint(config, auth) {
+        Ok(state) => Ok(state),
+        Err(_) if allow_default_context_fallback => {
+            let sanitized = patch_context_settings(config, ContextSettings::default())?;
+            projection_and_fingerprint(&sanitized, auth).map_err(TransactionError::from)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn projection_and_fingerprint(
+    config: &str,
+    auth: Option<&[u8]>,
+) -> Result<(RelevantProjection, String), CodexConfigError> {
+    Ok((
+        relevant_projection(config, auth)?,
+        relevant_fingerprint(config, auth)?,
+    ))
+}
+
 fn config_text<'a>(path: &Path, raw: Option<&'a [u8]>) -> Result<&'a str, TransactionError> {
     match raw {
         Some(raw) => str::from_utf8(raw).map_err(|source| TransactionError::InvalidConfigUtf8 {
@@ -1390,6 +1420,120 @@ requires_openai_auth = true
         );
         assert_eq!(manager.list_backups().unwrap().len(), 2);
         assert!(!paths.journal.exists());
+    }
+
+    #[test]
+    fn restoring_context_defaults_recovers_from_malformed_live_context_fields() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let malformed = format!(
+            "model_context_window = \"large\"\nmodel_auto_compact_token_limit = false\nmodel_auto_compact_token_limit_scope = 42\n{config}"
+        );
+        durable_fs::atomic_write(&paths.codex_config, malformed.as_bytes()).unwrap();
+
+        manager.update_context(ContextSettings::default()).unwrap();
+
+        let restored = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!restored.contains("model_context_window"));
+        assert!(!restored.contains("model_auto_compact_token_limit ="));
+        assert!(!restored.contains("model_auto_compact_token_limit_scope"));
+        assert!(restored.contains("model = \"managed-model\""));
+        assert_eq!(
+            manager.load_state().unwrap().unwrap().active_profile_id,
+            applied.state.active_profile_id
+        );
+    }
+
+    #[test]
+    fn restoring_defaults_requires_confirmation_when_saved_context_was_changed_and_malformed() {
+        let (_temp, paths, manager) = fixture();
+        manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap();
+        manager
+            .update_context(ContextSettings {
+                model_context_window: Some(272_000),
+                model_auto_compact_token_limit: Some(217_600),
+                model_auto_compact_token_limit_scope: Some(crate::domain::AutoCompactScope::Total),
+            })
+            .unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let malformed = config
+            .replace(
+                "model_context_window = 272000",
+                "model_context_window = \"large\"",
+            )
+            .replace(
+                "model_auto_compact_token_limit = 217600",
+                "model_auto_compact_token_limit = false",
+            )
+            .replace(
+                "model_auto_compact_token_limit_scope = \"total\"",
+                "model_auto_compact_token_limit_scope = 42",
+            );
+        durable_fs::atomic_write(&paths.codex_config, malformed.as_bytes()).unwrap();
+
+        let error = manager
+            .update_context(ContextSettings::default())
+            .unwrap_err();
+        assert!(matches!(error, TransactionError::ExternalConflict(_)));
+
+        manager
+            .update_context_with_policy(ContextSettings::default(), ConflictPolicy::Overwrite, None)
+            .unwrap();
+        let restored = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!restored.contains("model_context_window"));
+        assert!(!restored.contains("model_auto_compact_token_limit ="));
+        assert!(!restored.contains("model_auto_compact_token_limit_scope"));
+    }
+
+    #[test]
+    fn restoring_defaults_with_overwrite_still_rejects_non_context_errors() {
+        let (_temp, paths, manager) = fixture();
+        let malformed = ORIGINAL_CONFIG
+            .replace("model = \"old-model\"", "model = 42")
+            .replacen(
+                "\n[features]",
+                "\nmodel_context_window = \"large\"\n\n[features]",
+                1,
+            );
+        durable_fs::atomic_write(&paths.codex_config, malformed.as_bytes()).unwrap();
+
+        let error = manager
+            .update_context_with_policy(ContextSettings::default(), ConflictPolicy::Overwrite, None)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            TransactionError::CodexConfig(CodexConfigError::InvalidValueType { ref path, .. })
+                if path == "model"
+        ));
+        assert_eq!(fs::read_to_string(&paths.codex_config).unwrap(), malformed);
+        assert!(manager.list_backups().unwrap().is_empty());
+    }
+
+    #[test]
+    fn applying_default_context_recovers_from_malformed_live_context_fields() {
+        let (_temp, paths, manager) = fixture();
+        let malformed = ORIGINAL_CONFIG.replacen(
+            "\n[features]",
+            "\nmodel_context_window = \"large\"\nmodel_auto_compact_token_limit = false\nmodel_auto_compact_token_limit_scope = 42\n\n[features]",
+            1,
+        );
+        durable_fs::atomic_write(&paths.codex_config, malformed.as_bytes()).unwrap();
+        let mut target = activation("managed-model");
+        target.context = Some(crate::domain::ProfileContext::default());
+
+        manager.apply(&target, ConflictPolicy::Reject).unwrap();
+
+        let restored = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!restored.contains("model_context_window"));
+        assert!(!restored.contains("model_auto_compact_token_limit ="));
+        assert!(!restored.contains("model_auto_compact_token_limit_scope"));
+        assert!(restored.contains("model = \"managed-model\""));
     }
 
     #[test]

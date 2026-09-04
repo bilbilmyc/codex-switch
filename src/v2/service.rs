@@ -1538,9 +1538,8 @@ fn managed_live_profile_id(paths: &AppPaths) -> Option<ProfileId> {
         .ok()
         .flatten()?;
     let config = std::str::from_utf8(&config).ok()?;
-    codex_config::inspect_codex_config(config)
+    codex_config::inspect_model_provider_id_ignoring_context(config)
         .ok()?
-        .model_provider
         .as_deref()
         .and_then(profile_id_from_provider_id)
 }
@@ -2365,6 +2364,53 @@ requires_openai_auth = true
             context.model_auto_compact_token_limit_scope,
             Some(AutoCompactScope::Total)
         );
+    }
+
+    #[test]
+    fn active_profile_can_restore_defaults_from_malformed_context_fields() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let config = fs::read_to_string(&service.paths.codex_config).unwrap();
+        let malformed = format!(
+            "model_context_window = \"large\"\nmodel_auto_compact_token_limit = false\nmodel_auto_compact_token_limit_scope = 42\n{config}"
+        );
+        durable_fs::atomic_write(&service.paths.codex_config, malformed.as_bytes()).unwrap();
+
+        let response = service
+            .save_context(
+                created.id,
+                ContextDraft {
+                    use_defaults: true,
+                    window_k: String::new(),
+                    compact_percent: 80,
+                },
+            )
+            .unwrap();
+        let response = match response {
+            ApplyResponse::RequiresConfirmation { confirmation } => service
+                .continue_apply(confirmation.token, "sync_anyway".to_owned())
+                .unwrap(),
+            response => response,
+        };
+
+        let ApplyResponse::ContextSaved { context, .. } = response else {
+            panic!("expected restored context to be saved");
+        };
+        assert!(context.use_defaults);
+        assert!(context.is_active);
+        assert_eq!(context.sync_state, "synced");
+        let restored = fs::read_to_string(&service.paths.codex_config).unwrap();
+        assert!(!restored.contains("model_context_window"));
+        assert!(!restored.contains("model_auto_compact_token_limit ="));
+        assert!(!restored.contains("model_auto_compact_token_limit_scope"));
     }
 
     #[test]

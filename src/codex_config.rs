@@ -107,6 +107,14 @@ pub fn inspect_codex_config(raw: &str) -> Result<ConfigProjection, CodexConfigEr
     inspect_document(&document)
 }
 
+pub fn inspect_model_provider_id_ignoring_context(
+    raw: &str,
+) -> Result<Option<String>, CodexConfigError> {
+    let mut document = parse_document(raw)?;
+    remove_context_fields(document.as_table_mut());
+    inspect_document(&document).map(|projection| projection.model_provider)
+}
+
 pub fn patch_codex_config(
     raw: &str,
     activation: &Activation,
@@ -215,6 +223,10 @@ fn patch_context_fields(
     root: &mut Table,
     settings: ContextSettings,
 ) -> Result<(), CodexConfigError> {
+    if settings == ContextSettings::default() {
+        remove_context_fields(root);
+        return Ok(());
+    }
     if let (Some(window), Some(compact_limit)) = (
         settings.model_context_window,
         settings.model_auto_compact_token_limit,
@@ -230,6 +242,12 @@ fn patch_context_fields(
     )?;
     patch_optional_auto_compact_scope(root, settings.model_auto_compact_token_limit_scope)?;
     Ok(())
+}
+
+fn remove_context_fields(root: &mut Table) {
+    root.remove("model_context_window");
+    root.remove("model_auto_compact_token_limit");
+    root.remove("model_auto_compact_token_limit_scope");
 }
 
 pub fn import_current_provider(raw: &str) -> Result<ImportedProvider, CodexConfigError> {
@@ -847,6 +865,28 @@ model_auto_compact_token_limit_scope = "body_after_prefix"
     }
 
     #[test]
+    fn restoring_context_defaults_removes_malformed_managed_context_fields() {
+        let raw = r#"# keep
+model = "gpt-5"
+model_context_window = "large"
+model_auto_compact_token_limit = false
+model_auto_compact_token_limit_scope = 42
+
+[features]
+one = true
+"#;
+
+        let patched = patch_context_settings(raw, ContextSettings::default()).unwrap();
+
+        assert!(patched.contains("# keep"));
+        assert!(patched.contains("model = \"gpt-5\""));
+        assert!(patched.contains("[features]\none = true"));
+        assert!(!patched.contains("model_context_window"));
+        assert!(!patched.contains("model_auto_compact_token_limit ="));
+        assert!(!patched.contains("model_auto_compact_token_limit_scope"));
+    }
+
+    #[test]
     fn context_settings_reject_invalid_values_without_rewriting_the_file() {
         assert!(matches!(
             inspect_context_settings("model_context_window = 0\n"),
@@ -855,7 +895,11 @@ model_auto_compact_token_limit_scope = "body_after_prefix"
         assert!(matches!(
             patch_context_settings(
                 "model_context_window = \"large\"\n",
-                ContextSettings::default()
+                ContextSettings {
+                    model_context_window: Some(100_000),
+                    model_auto_compact_token_limit: Some(80_000),
+                    model_auto_compact_token_limit_scope: Some(AutoCompactScope::Total),
+                }
             ),
             Err(CodexConfigError::InvalidValueType { .. })
         ));

@@ -2516,9 +2516,8 @@ fn managed_live_profile_id(paths: &AppPaths) -> Option<ProfileId> {
         .ok()
         .flatten()?;
     let config = std::str::from_utf8(&config_bytes).ok()?;
-    codex_config::inspect_codex_config(config)
+    codex_config::inspect_model_provider_id_ignoring_context(config)
         .ok()?
-        .model_provider
         .as_deref()
         .and_then(profile_id_from_provider_id)
 }
@@ -3374,6 +3373,71 @@ requires_openai_auth = true
             recognize_active_profile(&paths, &manager, &document),
             Some(document.profiles[0].id)
         );
+    }
+
+    #[test]
+    fn managed_provider_identity_survives_malformed_context_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(temp.path());
+        let manager = TransactionManager::new(paths.clone());
+        let profile = Profile::new(
+            "Relay",
+            "https://relay.example/v1",
+            ApiKey::new("sk-test").unwrap(),
+            "gpt-5.6-sol",
+            None,
+        )
+        .unwrap();
+        let provider_id = provider_id_for_profile(profile.id);
+        let config = format!(
+            r#"model_provider = "{provider_id}"
+model = "gpt-5.6-sol"
+model_context_window = "large"
+model_auto_compact_token_limit = false
+model_auto_compact_token_limit_scope = 42
+"#
+        );
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        let mut document = ProfilesDocument::default();
+        document.insert(profile.clone()).unwrap();
+
+        assert_eq!(
+            recognize_active_profile(&paths, &manager, &document),
+            Some(profile.id)
+        );
+    }
+
+    #[test]
+    fn managed_provider_identity_still_rejects_non_context_config_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(temp.path());
+        let manager = TransactionManager::new(paths.clone());
+        let profile = Profile::new(
+            "Relay",
+            "https://relay.example/v1",
+            ApiKey::new("sk-test").unwrap(),
+            "gpt-5.6-sol",
+            None,
+        )
+        .unwrap();
+        let provider_id = provider_id_for_profile(profile.id);
+        let config = format!(
+            r#"model_provider = "{provider_id}"
+model = 42
+model_context_window = "large"
+
+[model_providers.{provider_id}]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#
+        );
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        let mut document = ProfilesDocument::default();
+        document.insert(profile).unwrap();
+
+        assert_eq!(recognize_active_profile(&paths, &manager, &document), None);
     }
 
     #[test]
