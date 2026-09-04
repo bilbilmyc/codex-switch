@@ -73,6 +73,8 @@ button:disabled {
 
 .legacy-app-shell {
   display: grid;
+  height: 100vh;
+  height: 100dvh;
   min-height: 100vh;
   grid-template-columns: 236px minmax(0, 1fr);
   background: var(--color-workspace);
@@ -684,6 +686,7 @@ button:disabled {
   width: 100%;
   max-width: none;
   padding-top: 0;
+  padding-bottom: 0;
 }
 
 .legacy-overview-grid {
@@ -1002,7 +1005,7 @@ button:disabled {
   position: relative;
   display: grid;
   min-width: 0;
-  min-height: 112px;
+  min-height: 104px;
   grid-template-columns: minmax(0, 1fr) auto;
   align-content: center;
   gap: 7px 12px;
