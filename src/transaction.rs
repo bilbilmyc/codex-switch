@@ -933,11 +933,17 @@ impl From<&BackupManifest> for BackupSummary {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredFile {
     present: bool,
     revision: String,
+}
+
+impl Default for StoredFile {
+    fn default() -> Self {
+        Self::from_contents(None)
+    }
 }
 
 impl StoredFile {
@@ -1631,6 +1637,33 @@ requires_openai_auth = true
         assert_eq!(fs::read(&paths.codex_auth).unwrap(), ORIGINAL_AUTH);
         assert_eq!(outcome.state.active_profile_id, None);
         assert!(manager.has_backup().unwrap());
+    }
+
+    #[test]
+    fn restore_accepts_legacy_backup_without_catalog_metadata() {
+        let (_temp, paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("new-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let manifest_path = manager
+            .backup_dir(applied.backup.id)
+            .join(BACKUP_MANIFEST_FILE);
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .as_object_mut()
+            .expect("backup manifest must be an object")
+            .remove("catalog");
+        durable_fs::atomic_write(&manifest_path, &serialize_json(&manifest).unwrap()).unwrap();
+
+        manager.restore_latest().unwrap();
+
+        assert_eq!(
+            fs::read(&paths.codex_config).unwrap(),
+            ORIGINAL_CONFIG.as_bytes()
+        );
+        assert_eq!(fs::read(&paths.codex_auth).unwrap(), ORIGINAL_AUTH);
+        assert!(!paths.managed_model_catalog.exists());
     }
 
     #[test]

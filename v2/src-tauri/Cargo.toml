@@ -1,0 +1,15 @@
+[package]
+name = "codex-switch-v2"
+version = "0.2.0-alpha.1"
+edition = "2024"
+rust-version = "1.92"
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+codex-switch = { path = "../.." }
+rfd = "0.15"
+tauri = { version = "2", features = [] }
+tauri-plugin-single-instance = "2"

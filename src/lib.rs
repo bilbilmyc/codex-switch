@@ -14,3 +14,4 @@ pub mod profiles;
 pub mod transaction;
 pub mod usage;
 pub mod usage_store;
+pub mod v2;

@@ -1,0 +1,184 @@
+import { invoke } from "@tauri-apps/api/core";
+import type {
+  ApplyResponse,
+  Bootstrap,
+  ContextDraft,
+  ContextView,
+  ModelListView,
+  ProfileDraft,
+  ProfileSummary,
+  UsageView,
+} from "./types";
+
+const isTauri = "__TAURI_INTERNALS__" in window;
+
+let previewProfiles: ProfileSummary[] = [
+  {
+    id: "preview-relay",
+    name: "团队中转站",
+    baseUrl: "https://relay.example.com/v1",
+    model: "gpt-5.2-codex",
+    reviewModel: "gpt-5.2",
+    hasApiKey: true,
+    isActive: true,
+  },
+];
+
+function toSummary(id: string, draft: ProfileDraft, isActive = false): ProfileSummary {
+  return {
+    id,
+    name: draft.name,
+    baseUrl: draft.baseUrl,
+    model: draft.model,
+    reviewModel: draft.reviewModel,
+    hasApiKey: Boolean(draft.apiKey),
+    isActive,
+  };
+}
+
+export const api = {
+  async bootstrap(): Promise<Bootstrap> {
+    if (isTauri) return invoke<Bootstrap>("bootstrap");
+    return { profiles: previewProfiles, canRestore: false };
+  },
+  async createProfile(draft: ProfileDraft): Promise<ProfileSummary> {
+    if (isTauri) return invoke<ProfileSummary>("create_profile", { draft });
+    const profile = toSummary(`preview-${crypto.randomUUID()}`, draft);
+    previewProfiles = [...previewProfiles, profile];
+    return profile;
+  },
+  async newProfile(): Promise<ProfileSummary> {
+    if (isTauri) return invoke<ProfileSummary>("new_profile");
+    const profile = toSummary(`preview-${crypto.randomUUID()}`, {
+      name: "新中转站",
+      baseUrl: "https://relay.example/v1",
+      apiKey: "",
+      model: "gpt-5",
+    });
+    previewProfiles = [...previewProfiles, profile];
+    return profile;
+  },
+  async updateProfile(profileId: string, draft: ProfileDraft): Promise<ProfileSummary> {
+    if (isTauri) return invoke<ProfileSummary>("update_profile", { profileId, draft });
+    const previous = previewProfiles.find((profile) => profile.id === profileId);
+    const profile = {
+      ...toSummary(profileId, draft, previous?.isActive),
+      hasApiKey: Boolean(draft.apiKey) || Boolean(previous?.hasApiKey),
+    };
+    previewProfiles = previewProfiles.map((item) => (item.id === profileId ? profile : item));
+    return profile;
+  },
+  async duplicateProfile(profileId: string): Promise<ProfileSummary> {
+    if (isTauri) return invoke<ProfileSummary>("duplicate_profile", { profileId });
+    const source = previewProfiles.find((profile) => profile.id === profileId)!;
+    const copy = {
+      ...source,
+      id: `preview-${crypto.randomUUID()}`,
+      name: `${source.name} 副本`,
+      isActive: false,
+    };
+    previewProfiles = [...previewProfiles, copy];
+    return copy;
+  },
+  async deleteProfile(profileId: string): Promise<void> {
+    if (isTauri) return invoke<void>("delete_profile", { profileId });
+    previewProfiles = previewProfiles.filter((profile) => profile.id !== profileId);
+  },
+  async importProfiles(): Promise<Bootstrap> {
+    if (isTauri) return invoke<Bootstrap>("import_profiles");
+    return { profiles: previewProfiles, canRestore: false };
+  },
+  async importCurrent(): Promise<ProfileSummary> {
+    if (isTauri) return invoke<ProfileSummary>("import_current");
+    return previewProfiles[0];
+  },
+  async exportProfiles(includeKeys: boolean): Promise<void> {
+    if (isTauri) return invoke<void>("export_profiles", { includeKeys });
+  },
+  async loadModelCache(profileId: string): Promise<ModelListView> {
+    if (isTauri) return invoke<ModelListView>("load_model_cache", { profileId });
+    const profile = previewProfiles.find((item) => item.id === profileId);
+    return { models: profile ? [profile.model] : [], cacheLabel: "尚未获取模型列表" };
+  },
+  async refreshModels(profileId: string, draft: ProfileDraft): Promise<ModelListView> {
+    if (isTauri) return invoke<ModelListView>("refresh_models", { profileId, draft });
+    return { models: [draft.model, "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"].filter(Boolean), cacheLabel: "刚刚获取了 4 个模型" };
+  },
+  async prepareRestore(): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("prepare_restore");
+    return {
+      kind: "restored",
+      activeProfileId: previewProfiles.find((profile) => profile.isActive)?.id,
+    };
+  },
+  async loadContext(profileId: string): Promise<ContextView> {
+    if (isTauri) return invoke<ContextView>("load_context", { profileId });
+    return {
+      useDefaults: true,
+      windowK: "",
+      compactPercent: 80,
+      summary: "自动窗口 · 输出不限 · 自动压缩",
+      isActive: true,
+      syncState: "synced",
+      status: "上下文配置 · 已同步到 Codex",
+      budget: {
+        recentSession: "暂无记录",
+        instructionTokens: "暂无记录",
+        availableBudget: "自动",
+        historyRatio: 0,
+        instructionRatio: 0,
+        remainingRatio: 1,
+        suggestedWindowK: "272",
+        instructions: [],
+      },
+    };
+  },
+  async saveContext(profileId: string, draft: ContextDraft): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("save_context", { profileId, draft });
+    return {
+      kind: "context_saved",
+      context: {
+        ...draft,
+        summary: draft.useDefaults
+          ? "自动窗口 · 输出不限 · 自动压缩"
+          : `${draft.windowK}K 窗口 · 输出不限 · 压缩 ${draft.compactPercent}%`,
+        isActive: true,
+        syncState: "synced",
+        status: "上下文配置 · 已同步到 Codex",
+        budget: {
+          recentSession: "暂无记录",
+          instructionTokens: "暂无记录",
+          availableBudget: "自动",
+          historyRatio: 0,
+          instructionRatio: 0,
+          remainingRatio: 1,
+          suggestedWindowK: "272",
+          instructions: [],
+        },
+      },
+    };
+  },
+  async refreshUsage(profileId: string, period: string): Promise<UsageView> {
+    if (isTauri) return invoke<UsageView>("refresh_usage", { profileId, period });
+    const zero = { input: "0", cached: "0", output: "0", calls: "0 次" };
+    return { period: period as UsageView["period"], current: zero, todaySummary: "今日暂无本地记录", periodTotal: zero, trend: [], models: [], hasData: false, status: "暂无用量数据" };
+  },
+  async exportUsage(profileId: string, period: string): Promise<void> {
+    if (isTauri) return invoke<void>("export_usage", { profileId, period });
+  },
+  async prepareApply(profileId: string): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("prepare_apply", { profileId });
+    previewProfiles = previewProfiles.map((profile) => ({
+      ...profile,
+      isActive: profile.id === profileId,
+    }));
+    return { kind: "applied", activeProfileId: profileId };
+  },
+  async continueApply(token: string, choice: string): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("continue_apply", { token, choice });
+    return { kind: "applied", activeProfileId: "preview-relay" };
+  },
+  async dismissConfirmation(token: string): Promise<void> {
+    if (isTauri) return invoke<void>("dismiss_confirmation", { token });
+  },
+};

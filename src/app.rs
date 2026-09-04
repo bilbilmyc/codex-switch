@@ -2352,38 +2352,7 @@ fn spawn_restore(
     set_status(ui, "正在恢复最近备份", 0);
     let weak = ui.as_weak();
     thread::spawn(move || {
-        let process_result = if quit_desktop {
-            process::quit_desktop_safely(Duration::from_secs(8)).map_err(|error| error.to_string())
-        } else {
-            Ok(())
-        };
-        let worker_result = match process_result {
-            Err(error) => {
-                logging::error("restore", format!("could not stop Codex Desktop: {error}"));
-                let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
-                RestoreWorkerResult::Failed {
-                    message: error,
-                    recovery_required: false,
-                }
-            }
-            Ok(()) => match TransactionManager::new(paths).restore_latest() {
-                Ok(_) => {
-                    logging::info("restore", "latest backup restored successfully");
-                    let relaunch_error = relaunch_desktop_if_closed(desktop_executable.as_deref());
-                    RestoreWorkerResult::Restored { relaunch_error }
-                }
-                Err(error) => {
-                    logging::error("restore", format!("restore failed: {error}"));
-                    let recovery_required =
-                        matches!(&error, TransactionError::RollbackFailed { .. });
-                    let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
-                    RestoreWorkerResult::Failed {
-                        message: error.to_string(),
-                        recovery_required,
-                    }
-                }
-            },
-        };
+        let worker_result = run_restore_worker(paths, quit_desktop, desktop_executable);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.set_busy(false);
             let mut controller = shared.lock().expect("controller mutex poisoned");
@@ -2422,6 +2391,44 @@ fn spawn_restore(
             }
         });
     });
+}
+
+fn run_restore_worker(
+    paths: AppPaths,
+    quit_desktop: bool,
+    desktop_executable: Option<PathBuf>,
+) -> RestoreWorkerResult {
+    let process_result = if quit_desktop {
+        process::quit_desktop_safely(Duration::from_secs(8)).map_err(|error| error.to_string())
+    } else {
+        Ok(())
+    };
+    match process_result {
+        Err(error) => {
+            logging::error("restore", format!("could not stop Codex Desktop: {error}"));
+            let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
+            RestoreWorkerResult::Failed {
+                message: error,
+                recovery_required: false,
+            }
+        }
+        Ok(()) => match TransactionManager::new(paths).restore_latest() {
+            Ok(_) => {
+                logging::info("restore", "latest backup restored successfully");
+                let relaunch_error = relaunch_desktop_if_closed(desktop_executable.as_deref());
+                RestoreWorkerResult::Restored { relaunch_error }
+            }
+            Err(error) => {
+                logging::error("restore", format!("restore failed: {error}"));
+                let recovery_required = matches!(&error, TransactionError::RollbackFailed { .. });
+                let _ = relaunch_desktop_if_closed(desktop_executable.as_deref());
+                RestoreWorkerResult::Failed {
+                    message: error.to_string(),
+                    recovery_required,
+                }
+            }
+        },
+    }
 }
 
 fn profile_from_ui(
@@ -3269,6 +3276,65 @@ requires_openai_auth = true
                 end_exclusive_unix_ms: u64::MAX,
             })
         );
+    }
+
+    #[test]
+    fn v1_restore_worker_accepts_legacy_backup_without_catalog_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(temp.path());
+        let original_config = r#"model_provider = "old"
+model = "old-model"
+
+[model_providers.old]
+name = "Old relay"
+base_url = "https://old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+        let original_auth = br#"{"OPENAI_API_KEY":"sk-old"}"#;
+        durable_fs::atomic_write(&paths.codex_config, original_config.as_bytes()).unwrap();
+        durable_fs::atomic_write(&paths.codex_auth, original_auth).unwrap();
+
+        let profile = Profile::new(
+            "Relay",
+            "https://relay.example/v1",
+            ApiKey::new("sk-new").unwrap(),
+            "new-model",
+            None,
+        )
+        .unwrap();
+        let applied = TransactionManager::new(paths.clone())
+            .apply(&profile.activation().unwrap(), ConflictPolicy::Reject)
+            .unwrap();
+        let manifest_path = paths
+            .backups_dir
+            .join(applied.backup.id.to_string())
+            .join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        manifest
+            .as_object_mut()
+            .expect("backup manifest must be an object")
+            .remove("catalog");
+        durable_fs::atomic_write(
+            &manifest_path,
+            &serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        match run_restore_worker(paths.clone(), false, None) {
+            RestoreWorkerResult::Restored { relaunch_error } => {
+                assert_eq!(relaunch_error, None);
+            }
+            RestoreWorkerResult::Failed { message, .. } => {
+                panic!("V1 restore worker rejected a legacy backup: {message}");
+            }
+        }
+        assert_eq!(
+            fs::read_to_string(&paths.codex_config).unwrap(),
+            original_config
+        );
+        assert_eq!(fs::read(&paths.codex_auth).unwrap(), original_auth);
     }
 
     #[test]

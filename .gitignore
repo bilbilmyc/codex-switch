@@ -1,5 +1,9 @@
 /target/
 /dist/
+/v2/frontend/node_modules/
+/v2/frontend/dist/
+/v2/src-tauri/target/
+/v2/src-tauri/gen/schemas/
 /.hallmark/
 /tokens.css
 /ui/ui-prototype.html

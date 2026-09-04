@@ -23,6 +23,14 @@ jobs:
         run: |
           package_version="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "codex-switch") | .version')"
           test "$GITHUB_REF_NAME" = "v$package_version"
+      - name: Require V2 package versions to agree
+        shell: bash
+        run: |
+          cargo_version="$(cargo metadata --manifest-path v2/src-tauri/Cargo.toml --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "codex-switch-v2") | .version')"
+          tauri_version="$(jq -er '.version' v2/src-tauri/tauri.conf.json)"
+          frontend_version="$(jq -er '.version' v2/frontend/package.json)"
+          test "$cargo_version" = "$tauri_version"
+          test "$cargo_version" = "$frontend_version"
 
   check:
     name: Check (${{ matrix.name }})
@@ -43,14 +51,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check formatting
         run: cargo fmt --all -- --check
+      - name: Check V2 Tauri formatting
+        run: cargo fmt --manifest-path v2/src-tauri/Cargo.toml -- --check
       - name: Run Clippy
         run: cargo clippy --all-targets -- -D warnings
       - name: Run tests
         run: cargo test --all-targets
+      - name: Check V2 Tauri shell
+        run: cargo check --manifest-path v2/src-tauri/Cargo.toml
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: v2/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: v2/frontend/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Type check
+        run: pnpm typecheck
+      - name: Run frontend tests
+        run: pnpm test
+      - name: Build frontend
+        run: pnpm build
 
   create-release:
     name: Create GitHub Release
-    needs: [check, validate-release-version]
+    needs: [check, frontend, validate-release-version]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -93,6 +130,49 @@ jobs:
         shell: bash
         run: scripts/normalize_macos_dmg.sh target/release/*.dmg
       - name: Upload installer to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.package_glob }}
+          fail_on_unmatched_files: true
+
+  package-v2:
+    name: Package V2 (${{ matrix.name }})
+    needs: [check, frontend, validate-release-version, create-release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            package_glob: v2/src-tauri/target/release/bundle/dmg/*.dmg
+          - name: Windows
+            os: windows-latest
+            package_glob: v2/src-tauri/target/release/bundle/nsis/*-setup.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: v2/frontend/pnpm-lock.yaml
+      - name: Install V2 frontend dependencies
+        working-directory: v2/frontend
+        run: pnpm install --frozen-lockfile
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+      - name: Build V2 native installer
+        working-directory: v2/src-tauri
+        run: cargo tauri build
+      - name: Upload V2 installer to the release
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.package_glob }}
