@@ -40,7 +40,16 @@ import {
   filterProfiles,
   profileSummaryToDraft,
   quickModelDraftState,
+  routeHost,
 } from "./profile-console";
+import { RouteAuditDialog, type RouteAuditStatus } from "./RouteAuditDialog";
+import {
+  runRouteAudit,
+  summarizeRouteAudit,
+  type ConnectionCheck,
+  type RouteAuditEntry,
+  type RouteAuditSession,
+} from "./route-audit";
 import type {
   ApplyResponse,
   Confirmation,
@@ -59,13 +68,6 @@ type ConfirmAction = "delete" | "restore" | "export" | null;
 type PendingSelection = { profileId: string } | null;
 type EditorSession = { mode: "create" } | { mode: "edit"; profile: ProfileSummary };
 type QuickModelDraft = { profileId: string; value: string } | null;
-type ConnectionCheck = {
-  state: "checking" | "success" | "error";
-  checkedAt?: number;
-  latencyMs?: number;
-  modelCount?: number;
-  message?: string;
-};
 
 const defaultContext: ContextDraft = {
   useDefaults: true,
@@ -90,6 +92,9 @@ export default function App() {
   const [notice, setNotice] = useState<Notice>(null);
   const [profileQuery, setProfileQuery] = useState("");
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
+  const [routeAuditOpen, setRouteAuditOpen] = useState(false);
+  const [routeAuditStatus, setRouteAuditStatus] = useState<RouteAuditStatus>("idle");
+  const [routeAuditSession, setRouteAuditSession] = useState<RouteAuditSession>();
   const [connectionChecks, setConnectionChecks] = useState<Record<string, ConnectionCheck>>({});
   const [quickModelDraft, setQuickModelDraft] = useState<QuickModelDraft>(null);
   const [contextDraft, setContextDraft] = useState<ContextDraft>(defaultContext);
@@ -102,6 +107,8 @@ export default function App() {
   const [usagePeriod, setUsagePeriod] = useState<UsageView["period"]>("today");
   const allowWindowClose = useRef(false);
   const closeAfterQuickModelSave = useRef(false);
+  const routeAuditRunId = useRef(0);
+  const routeAuditStopRequested = useRef(false);
 
   const profiles = bootstrap.data?.profiles ?? [];
   const selectedProfile = useMemo(
@@ -124,6 +131,9 @@ export default function App() {
   const selectedApplyState = selectedProfile
     ? describeApplyState(selectedProfile.applyState)
     : undefined;
+  const routeAuditBusy = routeAuditStatus === "running"
+    || routeAuditStatus === "stopping"
+    || routeAuditStatus === "retrying";
   const editorProfile = editorSession?.mode === "edit" ? editorSession.profile : undefined;
   const editorMode = editorSession?.mode;
   const context = useQuery({
@@ -191,6 +201,7 @@ export default function App() {
   const createProfile = useMutation({
     mutationFn: api.createProfile,
     onSuccess: async (profile) => {
+      invalidateRouteAudit();
       await refresh();
       setSelectedId(profile.id);
       setQuickModelDraft(null);
@@ -204,6 +215,7 @@ export default function App() {
     mutationFn: (values: { profileId: string; draft: ProfileDraft }) =>
       api.updateProfile(values.profileId, values.draft),
     onSuccess: async (profile) => {
+      invalidateRouteAudit();
       clearConnectionCheck(profile.id);
       await refresh();
       await refreshModelCache(profile.id);
@@ -218,6 +230,7 @@ export default function App() {
   const duplicateProfile = useMutation({
     mutationFn: api.duplicateProfile,
     onSuccess: async (profile) => {
+      invalidateRouteAudit();
       await refresh();
       setSelectedId(profile.id);
       setQuickModelDraft(null);
@@ -228,6 +241,7 @@ export default function App() {
   const deleteProfile = useMutation({
     mutationFn: api.deleteProfile,
     onSuccess: async () => {
+      invalidateRouteAudit();
       await refresh();
       setQuickModelDraft(null);
       setConfirmAction(null);
@@ -238,6 +252,8 @@ export default function App() {
   const importProfiles = useMutation({
     mutationFn: api.importProfiles,
     onSuccess: async (result) => {
+      invalidateRouteAudit();
+      setConnectionChecks({});
       await refresh();
       const last = result.profiles.at(-1);
       if (last) setSelectedId(last.id);
@@ -249,6 +265,7 @@ export default function App() {
   const importCurrent = useMutation({
     mutationFn: api.importCurrent,
     onSuccess: async (profile) => {
+      invalidateRouteAudit();
       await refresh();
       setSelectedId(profile.id);
       setQuickModelDraft(null);
@@ -272,43 +289,27 @@ export default function App() {
   });
   const checkConnection = useMutation({
     mutationFn: async (profile: ProfileSummary) => {
-      const startedAt = performance.now();
-      const result = await api.refreshModels(profile.id, profileSummaryToDraft(profile));
       return {
         profileId: profile.id,
-        result,
-        latencyMs: Math.max(1, Math.round(performance.now() - startedAt)),
+        connection: await probeProfileConnection(profile),
       };
     },
     onMutate: (profile) => {
-      setConnectionChecks((checks) => ({
-        ...checks,
-        [profile.id]: { state: "checking" },
-      }));
+      invalidateRouteAudit();
+      const connection: ConnectionCheck = { state: "checking" };
+      storeConnectionCheck(profile.id, connection);
     },
-    onSuccess: async ({ profileId, result, latencyMs }) => {
-      queryClient.setQueryData(["model-cache", profileId], result);
-      setConnectionChecks((checks) => ({
-        ...checks,
-        [profileId]: {
-          state: "success",
-          checkedAt: Date.now(),
-          latencyMs,
-          modelCount: result.models.length,
-        },
-      }));
-      await refreshModelCache(profileId);
+    onSuccess: ({ profileId, connection }) => {
+      storeConnectionCheck(profileId, connection);
       setNotice({
         tone: "success",
-        text: `连接正常，已获取 ${result.models.length} 个模型`,
+        text: `连接正常，已获取 ${connection.models.models.length} 个模型`,
       });
     },
     onError: (error, profile) => {
       const message = messageFor(error);
-      setConnectionChecks((checks) => ({
-        ...checks,
-        [profile.id]: { state: "error", checkedAt: Date.now(), message },
-      }));
+      const connection: ConnectionCheck = { state: "error", checkedAt: Date.now(), message };
+      storeConnectionCheck(profile.id, connection);
       setNotice({ tone: "error", text: `连接检查失败：${message}` });
     },
   });
@@ -316,6 +317,8 @@ export default function App() {
     mutationFn: ({ profile, model }: { profile: ProfileSummary; model: string; applyAfter: boolean }) =>
       api.updateProfile(profile.id, { ...profileSummaryToDraft(profile), model: model.trim() }),
     onSuccess: async (profile, variables) => {
+      invalidateRouteAudit();
+      clearConnectionCheck(profile.id);
       await refresh();
       await refreshModelCache(profile.id);
       setSelectedId(profile.id);
@@ -381,6 +384,7 @@ export default function App() {
       return;
     }
     if (response.kind === "imported_current") {
+      invalidateRouteAudit();
       await refresh();
       setSelectedId(response.profile.id);
       setQuickModelDraft(null);
@@ -398,6 +402,7 @@ export default function App() {
       return;
     }
     if (response.kind === "restored") {
+      invalidateRouteAudit();
       await refresh();
       await refreshContext();
       await refreshModelCache();
@@ -454,7 +459,7 @@ export default function App() {
   }
 
   function applySelectedProfile() {
-    if (!selectedProfile) return;
+    if (busy || !selectedProfile) return;
     if (quickModelDirty) {
       saveQuickModel(true);
       return;
@@ -464,7 +469,7 @@ export default function App() {
   }
 
   function saveQuickModel(applyAfter: boolean) {
-    if (!selectedProfile || !quickModelState.dirty) return;
+    if (busy || !selectedProfile || !quickModelState.dirty) return;
     if (!quickModelState.valid) {
       setNotice({ tone: "warning", text: "默认模型不能为空，请填写模型 ID 或撤销修改" });
       return;
@@ -474,7 +479,7 @@ export default function App() {
   }
 
   function changeQuickModel(value: string) {
-    if (!selectedProfile) return;
+    if (busy || !selectedProfile) return;
     setQuickModelDraft({ profileId: selectedProfile.id, value });
     setNotice({
       tone: "warning",
@@ -483,6 +488,7 @@ export default function App() {
   }
 
   function resetQuickModel() {
+    if (busy) return;
     setQuickModelDraft(null);
     setNotice({ tone: "success", text: "已撤销默认模型修改" });
   }
@@ -493,14 +499,132 @@ export default function App() {
   }
 
   function openProfileEditor(mode: "create" | "edit") {
-    if (!ensureWorkspaceSaved()) return;
+    if (busy || !ensureWorkspaceSaved()) return;
     setEditorSession(mode === "create" ? { mode } : { mode, profile: selectedProfile! });
   }
 
   function runConnectionCheck() {
-    if (!selectedProfile) return;
+    if (busy || !selectedProfile) return;
     if (!ensureQuickModelSaved()) return;
     checkConnection.mutate(selectedProfile);
+  }
+
+  async function probeProfileConnection(profile: ProfileSummary): Promise<Extract<ConnectionCheck, { state: "success" }>> {
+    const startedAt = performance.now();
+    const models = await api.refreshModels(profile.id, profileSummaryToDraft(profile));
+    return {
+      state: "success",
+      models,
+      latencyMs: Math.max(1, Math.round(performance.now() - startedAt)),
+      checkedAt: Date.now(),
+    };
+  }
+
+  function openRouteAudit() {
+    if (routeAuditBusy) {
+      setRouteAuditOpen(true);
+      return;
+    }
+    if (!ensureWorkspaceSaved()) return;
+    setRouteAuditOpen(true);
+  }
+
+  async function startRouteAudit() {
+    if (busy || profiles.length === 0 || !ensureWorkspaceSaved()) return;
+    const runId = routeAuditRunId.current + 1;
+    routeAuditRunId.current = runId;
+    routeAuditStopRequested.current = false;
+    setRouteAuditStatus("running");
+    setRouteAuditSession(undefined);
+    setRouteAuditOpen(true);
+    setConnectionChecks((checks) => {
+      const next = { ...checks };
+      for (const profile of profiles) delete next[profile.id];
+      return next;
+    });
+    setNotice({ tone: "warning", text: `正在巡检 ${profiles.length} 个中转站` });
+
+    const finished = await runRouteAudit({
+      profiles: [...profiles],
+      check: (profile) => api.refreshModels(profile.id, profileSummaryToDraft(profile)),
+      formatError: messageFor,
+      shouldStop: () => routeAuditStopRequested.current,
+      isCurrent: () => routeAuditRunId.current === runId,
+      onEntry: (entry, session) => {
+        if (routeAuditRunId.current !== runId) return;
+        setRouteAuditSession(session);
+        const connection = connectionFromAuditEntry(entry);
+        if (connection) storeConnectionCheck(entry.id, connection);
+        else if (entry.state === "incomplete") clearConnectionCheck(entry.id);
+      },
+      onProgress: (session) => {
+        if (routeAuditRunId.current === runId) setRouteAuditSession(session);
+      },
+    });
+
+    if (routeAuditRunId.current !== runId) return;
+    setRouteAuditSession(finished);
+    const stopped = finished.summary.stopped > 0;
+    setRouteAuditStatus(stopped ? "stopped" : "complete");
+    setNotice({
+      tone: finished.summary.error > 0 ? "warning" : "success",
+      text: stopped
+        ? `巡检已停止，${finished.summary.success + finished.summary.error + finished.summary.incomplete}/${finished.summary.total} 已完成`
+        : `巡检完成：${finished.summary.success} 可用，${finished.summary.incomplete} 未配置，${finished.summary.error} 失败`,
+    });
+  }
+
+  function stopRouteAudit() {
+    if (routeAuditStatus !== "running") return;
+    routeAuditStopRequested.current = true;
+    setRouteAuditStatus("stopping");
+  }
+
+  async function retryRouteAuditProfile(profile: ProfileSummary) {
+    if (busy || routeAuditBusy) return;
+    const runId = routeAuditRunId.current + 1;
+    routeAuditRunId.current = runId;
+    const remainingStopped = routeAuditSession?.entries.some(
+      (entry) => entry.id !== profile.id && entry.state === "stopped",
+    ) ?? false;
+    setRouteAuditStatus("retrying");
+    const checking: ConnectionCheck = { state: "checking" };
+    storeConnectionCheck(profile.id, checking);
+    mergeAuditConnection(profile.id, checking);
+
+    try {
+      const connection = await probeProfileConnection(profile);
+      if (routeAuditRunId.current !== runId) return;
+      storeConnectionCheck(profile.id, connection);
+      mergeAuditConnection(profile.id, connection);
+      setRouteAuditStatus(remainingStopped ? "stopped" : "complete");
+      setNotice({ tone: "success", text: `${profile.name} 连接正常，${connection.latencyMs} ms` });
+    } catch (error) {
+      if (routeAuditRunId.current !== runId) return;
+      const connection: ConnectionCheck = {
+        state: "error",
+        message: messageFor(error),
+        checkedAt: Date.now(),
+      };
+      storeConnectionCheck(profile.id, connection);
+      mergeAuditConnection(profile.id, connection);
+      setRouteAuditStatus(remainingStopped ? "stopped" : "complete");
+      setNotice({ tone: "error", text: `${profile.name} 重试失败：${connection.message}` });
+    }
+  }
+
+  function editRouteAuditProfile(profile: ProfileSummary) {
+    if (busy || !ensureWorkspaceSaved()) return;
+    setRouteAuditOpen(false);
+    setSelectedId(profile.id);
+    setPage("relay");
+    setEditorSession({ mode: "edit", profile });
+  }
+
+  function applyRouteAuditProfile(profile: ProfileSummary) {
+    if (busy || !ensureWorkspaceSaved()) return;
+    setRouteAuditOpen(false);
+    prepareApply.mutate(profile.id);
   }
 
   async function copyBaseUrl() {
@@ -545,6 +669,37 @@ export default function App() {
     });
   }
 
+  function storeConnectionCheck(profileId: string, connection: ConnectionCheck) {
+    if (connection.state === "success") {
+      queryClient.setQueryData(["model-cache", profileId], connection.models);
+    }
+    setConnectionChecks((checks) => ({ ...checks, [profileId]: connection }));
+  }
+
+  function mergeAuditConnection(profileId: string, connection: ConnectionCheck) {
+    setRouteAuditSession((current) => {
+      if (!current || !current.entries.some((entry) => entry.id === profileId)) return current;
+      const entries = current.entries.map<RouteAuditEntry>((entry) => (
+        entry.id === profileId
+          ? { id: entry.id, name: entry.name, ...connection }
+          : entry
+      ));
+      return {
+        ...current,
+        finishedAt: connection.state === "checking" ? undefined : Date.now(),
+        entries,
+        summary: summarizeRouteAudit(entries),
+      };
+    });
+  }
+
+  function invalidateRouteAudit() {
+    routeAuditRunId.current += 1;
+    routeAuditStopRequested.current = true;
+    setRouteAuditStatus("idle");
+    setRouteAuditSession(undefined);
+  }
+
   const busy =
     createProfile.isPending ||
     saveProfile.isPending ||
@@ -556,6 +711,7 @@ export default function App() {
     exportProfiles.isPending ||
     prepareApply.isPending ||
     checkConnection.isPending ||
+    routeAuditBusy ||
     updateQuickModel.isPending ||
     continueAction.isPending ||
     saveContext.isPending ||
@@ -566,6 +722,7 @@ export default function App() {
       || confirmation
       || confirmAction
       || pendingSelection
+      || routeAuditOpen
       || windowCloseQuickModel
       || windowCloseContext,
   );
@@ -649,6 +806,9 @@ export default function App() {
             value={profileQuery}
             onChange={(event) => setProfileQuery(event.target.value)}
           />
+          <button type="button" title="巡检全部中转站" aria-label="巡检全部中转站" disabled={profiles.length === 0 || (busy && !routeAuditBusy)} onClick={openRouteAudit}>
+            {routeAuditBusy ? <RefreshCw className="spin" size={15} /> : <Activity size={15} />}
+          </button>
           <button type="button" title="快速切换" aria-label="快速切换" onClick={requestQuickSwitcher}>
             <Route size={15} />
           </button>
@@ -676,6 +836,16 @@ export default function App() {
             {filteredProfiles.map((profile) => {
               const applyState = describeApplyState(profile.applyState);
               const hasModelDraft = quickModelDirty && selectedProfile?.id === profile.id;
+              const connection = connectionChecks[profile.id];
+              const badge = hasModelDraft
+                ? { label: "未保存", tone: "warning" }
+                : connection?.state === "checking"
+                  ? { label: "检查中", tone: "checking" }
+                  : connection?.state === "success"
+                    ? { label: `${connection.latencyMs} ms`, tone: "success" }
+                    : connection?.state === "error"
+                      ? { label: "失败", tone: "error" }
+                      : { label: applyState.badge, tone: applyState.tone };
               return <button
                 className={`legacy-profile-row ${selectedProfile?.id === profile.id ? "selected" : ""}`}
                 type="button"
@@ -683,12 +853,12 @@ export default function App() {
                 disabled={busy}
                 onClick={() => selectProfile(profile.id)}
               >
-                <span className={`legacy-profile-health ${profileHealthClass(profile, connectionChecks[profile.id])}`} />
+                <span className={`legacy-profile-health ${profileHealthClass(profile, connection)}`} />
                 <span className="legacy-profile-copy">
                   <strong>{profile.name}</strong>
                   <small>{profile.model || "未设置模型"}</small>
                 </span>
-                <span className={`legacy-active-label ${hasModelDraft ? "warning" : applyState.tone}`}>{hasModelDraft ? "未保存" : applyState.badge}</span>
+                <span className={`legacy-active-label ${badge.tone}`}>{badge.label}</span>
               </button>;
             })}
           </nav>
@@ -729,7 +899,7 @@ export default function App() {
               <Tab label="用量" active={page === "usage"} onClick={() => changePage("usage")} />
             </nav>
             <section className="legacy-page-content">
-              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} usage={todayUsage.data} usageLoading={todayUsage.isLoading} usageError={todayUsage.error} connection={connectionChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} onPageChange={changePage} />}
+              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} usage={todayUsage.data} usageLoading={todayUsage.isLoading} usageError={todayUsage.error} connection={connectionChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} locked={busy} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} onPageChange={changePage} />}
               {page === "context" && <ContextPage context={context.data} draft={contextDraft} dirty={contextDirty} loading={context.isLoading} onChange={(next) => { setContextDraft(next); setContextDirty(true); }} />}
               {page === "usage" && <UsagePage usage={usage.data} loading={usage.isLoading} error={usage.error} period={usagePeriod} onPeriod={setUsagePeriod} />}
             </section>
@@ -739,7 +909,7 @@ export default function App() {
                 <span>{notice?.text ?? (page === "usage" ? usage.error ? `本地用量读取失败：${messageFor(usage.error)}` : usage.data?.status ?? "正在读取本地用量数据" : statusText(page, contextDirty, quickModelDirty, context.data))}</span>
               </div>
               {page === "relay" && <>
-                <button className="legacy-command-button" type="button" title={quickModelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={checkConnection.isPending || quickModelDirty} onClick={runConnectionCheck}><Activity size={15} />{checkConnection.isPending ? "正在检查" : "检查连接"}</button>
+                <button className="legacy-command-button" type="button" title={quickModelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={busy || quickModelDirty} onClick={runConnectionCheck}><Activity size={15} />{checkConnection.isPending ? "正在检查" : "检查连接"}</button>
                 <button className="legacy-command-button" type="button" disabled={busy} onClick={() => openProfileEditor("edit")}><Pencil size={15} />编辑配置</button>
               </>}
               {page === "context" && <>
@@ -756,6 +926,7 @@ export default function App() {
       </section>
 
       <ProfileEditor mode={editorMode} profile={editorProfile} saving={saveProfile.isPending || createProfile.isPending} windowCloseRequest={windowCloseEditorRequest} onDirtyChange={setProfileDirty} onClose={() => { setProfileDirty(false); setEditorSession(undefined); }} onWindowCloseResolved={() => { setProfileDirty(false); setEditorSession(undefined); if (contextDirty) setWindowCloseContext(true); else closeWindow(); }} onSubmit={(profileId, draft) => profileId ? saveProfile.mutateAsync({ profileId, draft }) : createProfile.mutateAsync(draft)} />
+      <RouteAuditDialog open={routeAuditOpen} profiles={profiles} session={routeAuditSession} status={routeAuditStatus} locked={busy} onOpenChange={setRouteAuditOpen} actions={{ start: () => void startRouteAudit(), stop: stopRouteAudit, retry: (profile) => void retryRouteAuditProfile(profile), edit: editRouteAuditProfile, apply: applyRouteAuditProfile }} />
       <QuickSwitcher open={quickSwitcherOpen} profiles={profiles} selectedId={selectedProfile?.id} onOpenChange={setQuickSwitcherOpen} onSelect={(profileId) => { setQuickSwitcherOpen(false); selectProfile(profileId); }} onCreate={() => { setQuickSwitcherOpen(false); openProfileEditor("create"); }} />
       <ActionConfirmation confirmation={confirmation} pending={continueAction.isPending} onClose={(token) => { setCloseAfterContextSave(false); setConfirmation(undefined); setDeferredSelectionId(undefined); void api.dismissConfirmation(token); void refreshContext(); }} onChoice={(token, choice) => continueAction.mutate({ token, choice })} />
       <LegacyConfirm action={confirmAction} pending={deleteProfile.isPending || prepareRestore.isPending || exportProfiles.isPending} onClose={() => setConfirmAction(null)} onConfirm={() => {
@@ -788,7 +959,7 @@ function RouteBand({ profile, context, connection }: { profile: ProfileSummary; 
   </div>;
 }
 
-function RelayPage({ profile, context, modelCache, usage, usageLoading, usageError, connection, modelDraft, modelDirty, modelSaving, onModelDraft, onResetModel, onSaveModel, onCheck, onCopyUrl, onEdit, onPageChange }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; usage?: UsageView; usageLoading: boolean; usageError: unknown; connection?: ConnectionCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onCopyUrl: () => void; onEdit: () => void; onPageChange: (page: Page) => void }) {
+function RelayPage({ profile, context, modelCache, usage, usageLoading, usageError, connection, modelDraft, modelDirty, modelSaving, locked, onModelDraft, onResetModel, onSaveModel, onCheck, onCopyUrl, onEdit, onPageChange }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; usage?: UsageView; usageLoading: boolean; usageError: unknown; connection?: ConnectionCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; locked: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onCopyUrl: () => void; onEdit: () => void; onPageChange: (page: Page) => void }) {
   const todayUsage = usageLoading
     ? "正在读取本地用量数据"
     : usageError
@@ -816,7 +987,7 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
       <section className="legacy-overview-primary">
         <header className="legacy-console-section-head">
           <div><span>连接与模型</span><strong>确认中转地址，并选择 Codex 要使用的模型。</strong></div>
-          <button className="legacy-command-button" type="button" title={modelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={connection?.state === "checking" || modelDirty} onClick={onCheck}><Activity size={15} />{connection?.state === "checking" ? "正在检查" : "检查连接"}</button>
+          <button className="legacy-command-button" type="button" title={modelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={locked || connection?.state === "checking" || modelDirty} onClick={onCheck}><Activity size={15} />{connection?.state === "checking" ? "正在检查" : "检查连接"}</button>
         </header>
         <div className="legacy-detail-list">
           <div className="legacy-detail-row">
@@ -830,9 +1001,9 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
           <div className="legacy-detail-row model">
             <span>默认模型</span>
             <div className="legacy-model-console">
-              <div><div className="legacy-model-input-row"><input id="quick-model-input" aria-label="默认模型" list={`models-${profile.id}`} value={modelDraft} onChange={(event) => onModelDraft(event.target.value)} placeholder="输入模型 ID" /><button className="legacy-inline-icon" type="button" title="撤销默认模型修改" aria-label="撤销默认模型修改" disabled={!modelDirty || modelSaving} onClick={onResetModel}><RotateCcw size={15} /></button></div><datalist id={`models-${profile.id}`}>{modelCache?.models.map((model) => <option value={model} key={model} />)}</datalist><small>{modelDirty ? "有未保存修改，可保存或撤销" : modelCache?.cacheLabel ?? "检查连接后可从模型目录选择"}</small></div>
-              <button className="legacy-command-button" type="button" disabled={!modelChanged || modelSaving} onClick={() => onSaveModel(false)}><Save size={15} />保存</button>
-              <button className="legacy-command-button primary" type="button" disabled={!modelChanged || modelSaving} onClick={() => onSaveModel(true)}><Route size={15} />保存并应用</button>
+              <div><div className="legacy-model-input-row"><input id="quick-model-input" aria-label="默认模型" list={`models-${profile.id}`} value={modelDraft} disabled={locked} onChange={(event) => onModelDraft(event.target.value)} placeholder="输入模型 ID" /><button className="legacy-inline-icon" type="button" title="撤销默认模型修改" aria-label="撤销默认模型修改" disabled={locked || !modelDirty || modelSaving} onClick={onResetModel}><RotateCcw size={15} /></button></div><datalist id={`models-${profile.id}`}>{modelCache?.models.map((model) => <option value={model} key={model} />)}</datalist><small>{modelDirty ? "有未保存修改，可保存或撤销" : modelCache?.cacheLabel ?? "检查连接后可从模型目录选择"}</small></div>
+              <button className="legacy-command-button" type="button" disabled={locked || !modelChanged || modelSaving} onClick={() => onSaveModel(false)}><Save size={15} />保存</button>
+              <button className="legacy-command-button primary" type="button" disabled={locked || !modelChanged || modelSaving} onClick={() => onSaveModel(true)}><Route size={15} />保存并应用</button>
             </div>
           </div>
           <div className="legacy-detail-row">
@@ -842,7 +1013,7 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
         </div>
       </section>
       <aside className="legacy-readiness-panel" aria-label="中转站就绪检查">
-        <header><div><span>就绪检查</span><strong className={healthTone}>{healthLabel}</strong></div><button className="legacy-inline-link" type="button" onClick={onEdit}>编辑配置</button></header>
+        <header><div><span>就绪检查</span><strong className={healthTone}>{healthLabel}</strong></div><button className="legacy-inline-link" type="button" disabled={locked} onClick={onEdit}>编辑配置</button></header>
         <div className="legacy-readiness-list">
           {readiness.map((item) => <ReadinessItem key={item.label} {...item} />)}
         </div>
@@ -875,7 +1046,7 @@ function ConnectionResult({ connection }: { connection?: ConnectionCheck }) {
   if (!connection) return <div className="legacy-connection-result idle"><span>连接尚未检查</span><small>检查会请求中转站的模型列表。</small></div>;
   if (connection.state === "checking") return <div className="legacy-connection-result checking"><RefreshCw className="spin" size={15} /><div><span>正在连接中转站</span><small>读取模型目录并验证已保存凭据。</small></div></div>;
   if (connection.state === "error") return <div className="legacy-connection-result error"><CircleAlert size={15} /><div><span>连接检查失败</span><small>{connection.message}</small></div></div>;
-  return <div className="legacy-connection-result success"><CircleCheck size={15} /><div><span>连接正常 · {connection.latencyMs} ms</span><small>{connection.modelCount} 个模型 · {formatCheckTime(connection.checkedAt)}</small></div></div>;
+  return <div className="legacy-connection-result success"><CircleCheck size={15} /><div><span>连接正常 · {connection.latencyMs} ms</span><small>{connection.models.models.length} 个模型 · {formatCheckTime(connection.checkedAt)}</small></div></div>;
 }
 
 function ContextPage({ context, draft, dirty, loading, onChange }: { context?: ContextView; draft: ContextDraft; dirty: boolean; loading: boolean; onChange: (next: ContextDraft) => void }) {
@@ -1048,7 +1219,7 @@ function ProfileEditor({ mode, profile, saving, windowCloseRequest, onDirtyChang
     <form onSubmit={(event) => { event.preventDefault(); submit(); }}>
       <Field label="名称" error={form.formState.errors.name?.message}><input autoFocus {...form.register("name")} placeholder="我的中转站" /></Field>
       <Field label="接口地址" error={form.formState.errors.baseUrl?.message}><input {...form.register("baseUrl")} placeholder="https://relay.example.com/v1" /></Field>
-      <Field label="API Key" error={form.formState.errors.apiKey?.message}><input type="password" autoComplete="off" {...form.register("apiKey")} placeholder={profile ? "留空以保留已保存的凭据" : "输入中转站凭据"} />{profile && <span className="legacy-clear-key"><input type="checkbox" {...form.register("clearApiKey")} />清除已保存的 API Key</span>}</Field>
+      <Field label="API Key" error={form.formState.errors.apiKey?.message}><input type="password" autoComplete="off" {...form.register("apiKey")} placeholder={profile?.hasApiKey ? "留空以保留已保存的凭据" : "输入中转站凭据"} />{profile?.hasApiKey ? <span className="legacy-clear-key"><input type="checkbox" {...form.register("clearApiKey")} />清除已保存的 API Key</span> : null}</Field>
       <Field label="默认模型" error={form.formState.errors.model?.message}>
         <div className="legacy-model-field"><input list="codex-switch-models" {...form.register("model")} placeholder="gpt-5.2-codex" /><button className="legacy-icon-button" type="button" title="刷新模型列表" aria-label="刷新模型列表" disabled={refreshModels.isPending || !profile} onClick={() => refreshModels.mutate()}><RefreshCw className={refreshModels.isPending ? "spin" : ""} size={16} /></button></div>
         <datalist id="codex-switch-models">{models.map((model) => <option value={model} key={model} />)}</datalist>
@@ -1087,13 +1258,11 @@ function WindowCloseConfirmation({ open, saving, onCancel, onDiscard, onSave }: 
 
 function confirmationClass(intent: ConfirmationIntent) { return intent === "danger" ? "legacy-command-button danger" : "legacy-command-button primary"; }
 function statusText(page: Page, contextDirty: boolean, quickModelDirty: boolean, context?: ContextView) { if (page === "context") return contextDirty ? "上下文配置 · 有未保存修改" : context?.status ?? "上下文配置 · 已保存"; if (page === "usage") return "暂无用量数据"; return quickModelDirty ? "默认模型有未保存修改" : "就绪"; }
-function routeHost(baseUrl: string) {
-  if (!baseUrl) return "尚未设置";
-  try {
-    return new URL(baseUrl).host;
-  } catch {
-    return baseUrl;
-  }
+function connectionFromAuditEntry(entry: RouteAuditEntry): ConnectionCheck | undefined {
+  if (entry.state === "checking") return { state: "checking" };
+  if (entry.state === "success") return { state: "success", models: entry.models, latencyMs: entry.latencyMs, checkedAt: entry.checkedAt };
+  if (entry.state === "error") return { state: "error", message: entry.message, checkedAt: entry.checkedAt };
+  return undefined;
 }
 function routeStatus(profile: ProfileSummary, context?: ContextView, connection?: ConnectionCheck) {
   if (connection?.state === "checking") return { tone: "checking", label: "正在检查", detail: "读取模型目录" };

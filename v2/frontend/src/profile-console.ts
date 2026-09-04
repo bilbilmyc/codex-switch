@@ -100,6 +100,15 @@ export function filterProfiles(profiles: ProfileSummary[], query: string): Profi
   );
 }
 
+export function routeHost(baseUrl: string) {
+  if (!baseUrl) return "尚未设置";
+  try {
+    return new URL(baseUrl).host;
+  } catch {
+    return baseUrl;
+  }
+}
+
 export function profileSummaryToDraft(profile: ProfileSummary): ProfileDraft {
   return {
     name: profile.name,

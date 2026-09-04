@@ -123,7 +123,8 @@ export const api = {
   },
   async refreshModels(profileId: string, draft: ProfileDraft): Promise<ModelListView> {
     if (isTauri) return invoke<ModelListView>("refresh_models", { profileId, draft });
-    return { models: [draft.model, "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"].filter(Boolean), cacheLabel: "刚刚获取了 4 个模型" };
+    const models = [...new Set([draft.model, "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"].filter(Boolean))];
+    return { models, cacheLabel: `刚刚获取了 ${models.length} 个模型` };
   },
   async prepareRestore(): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("prepare_restore");
