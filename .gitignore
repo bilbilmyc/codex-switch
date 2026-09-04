@@ -4,6 +4,8 @@
 /v2/frontend/dist/
 /v2/src-tauri/target/
 /v2/src-tauri/gen/schemas/
+/.playwright-cli/
+/output/playwright/
 /.hallmark/
 /tokens.css
 /ui/ui-prototype.html

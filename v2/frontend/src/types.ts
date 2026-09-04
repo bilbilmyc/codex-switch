@@ -7,6 +7,13 @@ export type ProfileDraft = {
   reviewModel?: string;
 };
 
+export type ProfileApplyState =
+  | "inactive"
+  | "applied"
+  | "pending_changes"
+  | "external_drift"
+  | "unknown";
+
 export type ProfileSummary = {
   id: string;
   name: string;
@@ -15,6 +22,7 @@ export type ProfileSummary = {
   reviewModel?: string;
   hasApiKey: boolean;
   isActive: boolean;
+  applyState: ProfileApplyState;
 };
 
 export type Bootstrap = {

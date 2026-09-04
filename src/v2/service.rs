@@ -49,6 +49,17 @@ pub struct ProfileSummary {
     pub review_model: Option<String>,
     pub has_api_key: bool,
     pub is_active: bool,
+    pub apply_state: ProfileApplyState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileApplyState {
+    Inactive,
+    Applied,
+    PendingChanges,
+    ExternalDrift,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -298,12 +309,20 @@ impl AppService {
         }
         let document = self.store().load().map_err(ServiceError::profiles)?;
         let active_profile_id = self.active_profile_id(&document);
+        let (live_profile, baseline_matches) = self.live_apply_context();
 
         Ok(Bootstrap {
             profiles: document
                 .profiles
                 .iter()
-                .map(|profile| ProfileSummary::from_profile(profile, active_profile_id))
+                .map(|profile| {
+                    ProfileSummary::from_profile(
+                        profile,
+                        active_profile_id,
+                        live_profile.as_ref(),
+                        baseline_matches,
+                    )
+                })
                 .collect(),
             can_restore: TransactionManager::new(self.paths.clone())
                 .has_backup()
@@ -333,10 +352,7 @@ impl AppService {
         self.store()
             .save(&document)
             .map_err(ServiceError::profiles)?;
-        Ok(ProfileSummary::from_profile(
-            &profile,
-            self.active_profile_id(&document),
-        ))
+        Ok(self.profile_summary(&profile, &document))
     }
 
     pub fn create_profile(&self, draft: ProfileDraft) -> Result<ProfileSummary, ServiceError> {
@@ -350,10 +366,7 @@ impl AppService {
         self.store()
             .save(&document)
             .map_err(ServiceError::profiles)?;
-        Ok(ProfileSummary::from_profile(
-            &profile,
-            self.active_profile_id(&document),
-        ))
+        Ok(self.profile_summary(&profile, &document))
     }
 
     pub fn update_profile(
@@ -381,10 +394,7 @@ impl AppService {
         if invalidate_model_cache {
             let _ = models::remove_cache(&self.paths.model_cache_dir, profile_id);
         }
-        Ok(ProfileSummary::from_profile(
-            &profile,
-            self.active_profile_id(&document),
-        ))
+        Ok(self.profile_summary(&profile, &document))
     }
 
     pub fn duplicate_profile(&self, profile_id: String) -> Result<ProfileSummary, ServiceError> {
@@ -405,10 +415,7 @@ impl AppService {
         self.store()
             .save(&document)
             .map_err(ServiceError::profiles)?;
-        Ok(ProfileSummary::from_profile(
-            &duplicate,
-            self.active_profile_id(&document),
-        ))
+        Ok(self.profile_summary(&duplicate, &document))
     }
 
     pub fn delete_profile(&self, profile_id: String) -> Result<(), ServiceError> {
@@ -848,6 +855,26 @@ impl AppService {
         ProfileStore::new(self.paths.profiles.clone())
     }
 
+    fn profile_summary(&self, profile: &Profile, document: &ProfilesDocument) -> ProfileSummary {
+        let active_profile_id = self.active_profile_id(document);
+        let (live_profile, baseline_matches) = self.live_apply_context();
+        ProfileSummary::from_profile(
+            profile,
+            active_profile_id,
+            live_profile.as_ref(),
+            baseline_matches,
+        )
+    }
+
+    fn live_apply_context(&self) -> (Option<Profile>, RelevantFingerprintMatch) {
+        let live_profile = read_live_profile(&self.paths).ok();
+        let baseline_matches = match TransactionManager::new(self.paths.clone()).load_state() {
+            Ok(Some(state)) => current_fingerprint_match(&self.paths, &state.relevant_fingerprint),
+            Ok(None) | Err(_) => RelevantFingerprintMatch::Unknown,
+        };
+        (live_profile, baseline_matches)
+    }
+
     fn migrate_legacy_profiles_if_needed(&self) -> Result<(), ServiceError> {
         if self.paths.profiles.exists() {
             return Ok(());
@@ -1265,7 +1292,7 @@ impl AppService {
             .map(|error| format!("已导入当前配置，但无法建立冲突检测基线：{error}"));
 
         Ok(ApplyResponse::ImportedCurrent {
-            profile: ProfileSummary::from_profile(&profile, Some(profile.id)),
+            profile: self.profile_summary(&profile, &document),
             warning,
         })
     }
@@ -1302,7 +1329,27 @@ impl AppService {
 }
 
 impl ProfileSummary {
-    fn from_profile(profile: &Profile, active_profile_id: Option<ProfileId>) -> Self {
+    fn from_profile(
+        profile: &Profile,
+        active_profile_id: Option<ProfileId>,
+        live_profile: Option<&Profile>,
+        baseline_matches: RelevantFingerprintMatch,
+    ) -> Self {
+        let is_active = active_profile_id == Some(profile.id);
+        let apply_state = if !is_active {
+            ProfileApplyState::Inactive
+        } else {
+            match live_profile {
+                Some(live) if same_connection(profile, live) => ProfileApplyState::Applied,
+                Some(_) => match baseline_matches {
+                    RelevantFingerprintMatch::Exact => ProfileApplyState::PendingChanges,
+                    RelevantFingerprintMatch::Mismatch => ProfileApplyState::ExternalDrift,
+                    RelevantFingerprintMatch::LegacyPreContext
+                    | RelevantFingerprintMatch::Unknown => ProfileApplyState::Unknown,
+                },
+                None => ProfileApplyState::Unknown,
+            }
+        };
         Self {
             id: profile.id.to_string(),
             name: profile.name.clone(),
@@ -1310,7 +1357,8 @@ impl ProfileSummary {
             model: profile.model.clone(),
             review_model: profile.review_model.clone(),
             has_api_key: profile.api_key.is_some(),
-            is_active: active_profile_id == Some(profile.id),
+            is_active,
+            apply_state,
         }
     }
 }
@@ -1497,26 +1545,50 @@ fn managed_live_profile_id(paths: &AppPaths) -> Option<ProfileId> {
         .and_then(profile_id_from_provider_id)
 }
 
-fn current_fingerprint_matches(paths: &AppPaths, expected: &str) -> bool {
-    let Some(config_bytes) = durable_fs::read_optional(&paths.codex_config)
-        .ok()
-        .flatten()
-    else {
-        return false;
-    };
-    let Some(config) = std::str::from_utf8(&config_bytes).ok() else {
-        return false;
-    };
-    let Some(auth) = durable_fs::read_optional(&paths.codex_auth).ok() else {
-        return false;
-    };
-    let Some(projection) = codex_config::relevant_projection(config, auth.as_deref()).ok() else {
-        return false;
-    };
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RelevantFingerprintMatch {
+    Exact,
+    LegacyPreContext,
+    Mismatch,
+    Unknown,
+}
 
-    codex_config::relevant_fingerprint(config, auth.as_deref()).is_ok_and(|value| value == expected)
-        || codex_config::pre_context_relevant_fingerprint(&projection)
-            .is_ok_and(|value| value == expected)
+fn current_fingerprint_match(paths: &AppPaths, expected: &str) -> RelevantFingerprintMatch {
+    let config_bytes = match durable_fs::read_optional(&paths.codex_config) {
+        Ok(Some(config)) => config,
+        Ok(None) | Err(_) => return RelevantFingerprintMatch::Unknown,
+    };
+    let config = match std::str::from_utf8(&config_bytes) {
+        Ok(config) => config,
+        Err(_) => return RelevantFingerprintMatch::Unknown,
+    };
+    let auth = match durable_fs::read_optional(&paths.codex_auth) {
+        Ok(auth) => auth,
+        Err(_) => return RelevantFingerprintMatch::Unknown,
+    };
+    let projection = match codex_config::relevant_projection(config, auth.as_deref()) {
+        Ok(projection) => projection,
+        Err(_) => return RelevantFingerprintMatch::Unknown,
+    };
+    let fingerprint = match codex_config::relevant_fingerprint(config, auth.as_deref()) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return RelevantFingerprintMatch::Unknown,
+    };
+    if fingerprint == expected {
+        return RelevantFingerprintMatch::Exact;
+    }
+    match codex_config::pre_context_relevant_fingerprint(&projection) {
+        Ok(fingerprint) if fingerprint == expected => RelevantFingerprintMatch::LegacyPreContext,
+        Ok(_) => RelevantFingerprintMatch::Mismatch,
+        Err(_) => RelevantFingerprintMatch::Unknown,
+    }
+}
+
+fn current_fingerprint_matches(paths: &AppPaths, expected: &str) -> bool {
+    matches!(
+        current_fingerprint_match(paths, expected),
+        RelevantFingerprintMatch::Exact | RelevantFingerprintMatch::LegacyPreContext
+    )
 }
 
 fn same_connection(left: &Profile, right: &Profile) -> bool {
@@ -2081,6 +2153,152 @@ requires_openai_auth = true
             .unwrap();
 
         assert_eq!(service.active_profile_id(&document), Some(second.id));
+    }
+
+    #[test]
+    fn active_profile_reports_saved_changes_as_pending_until_reapplied() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+
+        let applied = service.bootstrap().unwrap().profiles.remove(0);
+        assert!(applied.is_active);
+        assert_eq!(applied.apply_state, ProfileApplyState::Applied);
+
+        let mut update = draft("Relay A");
+        update.model = "gpt-5.6-sol".to_owned();
+        let pending = service.update_profile(created.id, update).unwrap();
+        assert!(pending.is_active);
+        assert_eq!(pending.apply_state, ProfileApplyState::PendingChanges);
+
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let reapplied = service.bootstrap().unwrap().profiles.remove(0);
+        assert_eq!(reapplied.apply_state, ProfileApplyState::Applied);
+    }
+
+    #[test]
+    fn active_profile_distinguishes_external_drift_from_saved_changes() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let external_config = fs::read_to_string(&service.paths.codex_config)
+            .unwrap()
+            .replace("model = \"gpt-5.2-codex\"", "model = \"external-model\"");
+        durable_fs::atomic_write(&service.paths.codex_config, external_config.as_bytes()).unwrap();
+
+        let drifted = service.bootstrap().unwrap().profiles.remove(0);
+
+        assert!(drifted.is_active);
+        assert_eq!(drifted.apply_state, ProfileApplyState::ExternalDrift);
+    }
+
+    #[test]
+    fn legacy_pre_context_state_reports_context_differences_as_unknown() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        let manager = TransactionManager::new(service.paths.clone());
+        manager
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+
+        let config = fs::read_to_string(&service.paths.codex_config).unwrap();
+        let auth = fs::read(&service.paths.codex_auth).unwrap();
+        let projection = codex_config::relevant_projection(&config, Some(&auth)).unwrap();
+        let mut state = manager.load_state().unwrap().unwrap();
+        state.relevant_fingerprint =
+            codex_config::pre_context_relevant_fingerprint(&projection).unwrap();
+        durable_fs::atomic_write(
+            &service.paths.state,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+
+        let external_config = codex_config::patch_context_settings(
+            &config,
+            codex_config::ContextSettings {
+                model_context_window: Some(272_000),
+                model_auto_compact_token_limit: Some(217_600),
+                model_auto_compact_token_limit_scope: Some(AutoCompactScope::Total),
+            },
+        )
+        .unwrap();
+        durable_fs::atomic_write(&service.paths.codex_config, external_config.as_bytes()).unwrap();
+
+        let summary = service.bootstrap().unwrap().profiles.remove(0);
+
+        assert!(summary.is_active);
+        assert_eq!(summary.apply_state, ProfileApplyState::Unknown);
+    }
+
+    #[test]
+    fn unreadable_live_credentials_report_an_unknown_apply_state() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        durable_fs::atomic_write(&service.paths.codex_auth, b"not-json").unwrap();
+
+        let summary = service.bootstrap().unwrap().profiles.remove(0);
+
+        assert!(summary.is_active);
+        assert_eq!(summary.apply_state, ProfileApplyState::Unknown);
+    }
+
+    #[test]
+    fn profile_summary_serializes_the_apply_state_contract() {
+        for (apply_state, expected) in [
+            (ProfileApplyState::Inactive, "inactive"),
+            (ProfileApplyState::Applied, "applied"),
+            (ProfileApplyState::PendingChanges, "pending_changes"),
+            (ProfileApplyState::ExternalDrift, "external_drift"),
+            (ProfileApplyState::Unknown, "unknown"),
+        ] {
+            let value = serde_json::to_value(ProfileSummary {
+                id: "profile-id".to_owned(),
+                name: "Relay A".to_owned(),
+                base_url: "https://relay.example/v1".to_owned(),
+                model: "gpt-5.2-codex".to_owned(),
+                review_model: None,
+                has_api_key: true,
+                is_active: apply_state != ProfileApplyState::Inactive,
+                apply_state,
+            })
+            .unwrap();
+
+            assert_eq!(value["applyState"], expected);
+            assert!(value.get("isApplied").is_none());
+        }
     }
 
     #[test]

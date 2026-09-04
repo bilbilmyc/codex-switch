@@ -21,8 +21,11 @@ let previewProfiles: ProfileSummary[] = [
     reviewModel: "gpt-5.2",
     hasApiKey: true,
     isActive: true,
+    applyState: "applied",
   },
 ];
+
+let previewLiveProfile = { ...previewProfiles[0] };
 
 function toSummary(id: string, draft: ProfileDraft, isActive = false): ProfileSummary {
   return {
@@ -33,7 +36,23 @@ function toSummary(id: string, draft: ProfileDraft, isActive = false): ProfileSu
     reviewModel: draft.reviewModel,
     hasApiKey: Boolean(draft.apiKey),
     isActive,
+    applyState: "inactive",
   };
+}
+
+function previewApplyState(
+  profile: ProfileSummary,
+  credentialChanged = false,
+): ProfileSummary["applyState"] {
+  if (profile.id !== previewLiveProfile.id) return "inactive";
+  if (credentialChanged) return "pending_changes";
+  return profile.name === previewLiveProfile.name
+    && profile.baseUrl === previewLiveProfile.baseUrl
+    && profile.model === previewLiveProfile.model
+    && profile.reviewModel === previewLiveProfile.reviewModel
+    && profile.hasApiKey === previewLiveProfile.hasApiKey
+    ? "applied"
+    : "pending_changes";
 }
 
 export const api = {
@@ -63,8 +82,9 @@ export const api = {
     const previous = previewProfiles.find((profile) => profile.id === profileId);
     const profile = {
       ...toSummary(profileId, draft, previous?.isActive),
-      hasApiKey: Boolean(draft.apiKey) || Boolean(previous?.hasApiKey),
+      hasApiKey: draft.clearApiKey ? false : Boolean(draft.apiKey) || Boolean(previous?.hasApiKey),
     };
+    profile.applyState = previewApplyState(profile, Boolean(draft.apiKey?.trim()));
     previewProfiles = previewProfiles.map((item) => (item.id === profileId ? profile : item));
     return profile;
   },
@@ -76,6 +96,7 @@ export const api = {
       id: `preview-${crypto.randomUUID()}`,
       name: `${source.name} 副本`,
       isActive: false,
+      applyState: "inactive" as const,
     };
     previewProfiles = [...previewProfiles, copy];
     return copy;
@@ -168,14 +189,24 @@ export const api = {
   },
   async prepareApply(profileId: string): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("prepare_apply", { profileId });
+    const target = previewProfiles.find((profile) => profile.id === profileId);
+    if (target) previewLiveProfile = { ...target, isActive: true, applyState: "applied" };
     previewProfiles = previewProfiles.map((profile) => ({
       ...profile,
       isActive: profile.id === profileId,
+      applyState: profile.id === profileId ? "applied" : "inactive",
     }));
     return { kind: "applied", activeProfileId: profileId };
   },
   async continueApply(token: string, choice: string): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("continue_apply", { token, choice });
+    previewProfiles = previewProfiles.map((profile) => ({
+      ...profile,
+      isActive: profile.id === "preview-relay",
+      applyState: profile.id === "preview-relay" ? "applied" : "inactive",
+    }));
+    const target = previewProfiles.find((profile) => profile.id === "preview-relay");
+    if (target) previewLiveProfile = { ...target };
     return { kind: "applied", activeProfileId: "preview-relay" };
   },
   async dismissConfirmation(token: string): Promise<void> {
