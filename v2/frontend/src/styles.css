@@ -996,6 +996,142 @@ button:disabled {
   color: var(--color-accent);
 }
 
+.legacy-deep-validation {
+  margin-top: 14px;
+  border-top: 1px solid var(--color-line);
+  padding-top: 13px;
+}
+
+.legacy-deep-validation > header {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.legacy-deep-validation > header > div {
+  min-width: 0;
+}
+
+.legacy-deep-validation > header strong,
+.legacy-deep-validation > header span {
+  display: block;
+}
+
+.legacy-deep-validation > header strong {
+  color: var(--color-ink);
+  font-size: 11px;
+}
+
+.legacy-deep-validation > header span {
+  margin-top: 3px;
+  color: var(--color-muted);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.legacy-deep-validation > header .legacy-command-button {
+  justify-self: start;
+}
+
+.legacy-deep-validation-result {
+  display: grid;
+  min-width: 0;
+  min-height: 58px;
+  grid-template-columns: 17px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  margin-top: 11px;
+  background: var(--color-surface-muted);
+  padding: 9px 10px;
+}
+
+.legacy-deep-validation-result > svg {
+  margin-top: 1px;
+  color: var(--color-muted-strong);
+}
+
+.legacy-deep-validation-result > div {
+  min-width: 0;
+}
+
+.legacy-deep-validation-result > div > strong,
+.legacy-deep-validation-result > div > span,
+.legacy-deep-validation-result > div > small {
+  display: block;
+}
+
+.legacy-deep-validation-result > div > strong {
+  color: var(--color-ink);
+  font-size: 11px;
+}
+
+.legacy-deep-validation-result > div > span,
+.legacy-deep-validation-result > div > small {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: var(--color-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.legacy-deep-validation-result.checking > svg,
+.legacy-deep-validation-result.checking > div > strong {
+  color: var(--color-accent);
+}
+
+.legacy-deep-validation-result.success {
+  background: var(--color-success-soft);
+}
+
+.legacy-deep-validation-result.success > svg,
+.legacy-deep-validation-result.success > div > strong {
+  color: var(--color-success-strong);
+}
+
+.legacy-deep-validation-result.error {
+  background: var(--color-danger-soft);
+}
+
+.legacy-deep-validation-result.error > svg,
+.legacy-deep-validation-result.error > div > strong {
+  color: var(--color-danger);
+}
+
+.legacy-deep-validation-metrics {
+  display: flex;
+  min-width: 0;
+  grid-column: 2;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid rgb(91 107 127 / 18%);
+  margin-top: 2px;
+  padding-top: 7px;
+}
+
+.legacy-deep-validation-metrics strong,
+.legacy-deep-validation-metrics time {
+  display: block;
+  color: var(--color-muted-strong);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.legacy-deep-validation-metrics strong > span {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--color-muted);
+  font-family: var(--font-ui);
+  font-size: 9px;
+  font-weight: 600;
+}
+
+.legacy-deep-validation-metrics time {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
 .legacy-console-previews {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

@@ -51,6 +51,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             commands::export_profiles,
             commands::load_model_cache,
             commands::refresh_models,
+            commands::deep_validate_profile,
             commands::load_backup_center,
             commands::load_backup_preview,
             commands::prepare_backup_restore,

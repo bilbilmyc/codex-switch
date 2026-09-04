@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use codex_switch::v2::{
     AppService, ApplyResponse, BackupCenterView, BackupPreviewView, Bootstrap, ContextDraft,
-    ContextView, ModelListView, ProfileDraft, ProfileSummary, UsageView,
+    ContextView, DeepValidationView, ModelListView, ProfileDraft, ProfileSummary, UsageView,
 };
 use tauri::State;
 
@@ -123,6 +123,18 @@ pub async fn refresh_models(
     tauri::async_runtime::spawn_blocking(move || service.refresh_models(profile_id, draft))
         .await
         .map_err(|_| "模型刷新任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn deep_validate_profile(
+    profile_id: String,
+    state: State<'_, AppState>,
+) -> Result<DeepValidationView, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.deep_validate_profile(profile_id))
+        .await
+        .map_err(|_| "深度验证任务已中断".to_owned())?
         .map_err(|error| error.to_string())
 }
 

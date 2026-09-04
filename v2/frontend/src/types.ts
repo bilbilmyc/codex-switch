@@ -86,6 +86,30 @@ export type ModelListView = {
   cacheLabel: string;
 };
 
+export type DeepValidationErrorCategory =
+  | "missing_api_key"
+  | "invalid_base_url"
+  | "unauthorized"
+  | "rate_limited"
+  | "upstream_error"
+  | "request_timeout"
+  | "network_error"
+  | "response_too_large"
+  | "invalid_response"
+  | "request_rejected";
+
+export type DeepValidationResult = {
+  status: "success" | "failed";
+  requestDurationMs: number;
+  checkedAtUnixMs: number;
+  errorCategory?: DeepValidationErrorCategory;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+};
+
 export type ContextDraft = {
   useDefaults: boolean;
   windowK: string;

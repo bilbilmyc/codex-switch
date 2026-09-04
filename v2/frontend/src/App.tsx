@@ -21,6 +21,7 @@ import {
   Route,
   Save,
   Search,
+  Send,
   Server,
   Trash2,
   Upload,
@@ -30,6 +31,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { api } from "./api";
 import { BackupCenterDialog, formatBackupLocalTime } from "./BackupCenterDialog";
+import {
+  deepValidationActionLabel,
+  deepValidationPresentation,
+  type DeepValidationCheck,
+} from "./deep-validation";
 import {
   emptyProfileForm,
   profileSchema,
@@ -46,6 +52,7 @@ import {
 import { RouteAuditDialog, type RouteAuditStatus } from "./RouteAuditDialog";
 import {
   runRouteAudit,
+  profileConfigurationIssue,
   summarizeRouteAudit,
   type ConnectionCheck,
   type RouteAuditEntry,
@@ -98,6 +105,7 @@ export default function App() {
   const [routeAuditStatus, setRouteAuditStatus] = useState<RouteAuditStatus>("idle");
   const [routeAuditSession, setRouteAuditSession] = useState<RouteAuditSession>();
   const [connectionChecks, setConnectionChecks] = useState<Record<string, ConnectionCheck>>({});
+  const [deepValidationChecks, setDeepValidationChecks] = useState<Record<string, DeepValidationCheck>>({});
   const [quickModelDraft, setQuickModelDraft] = useState<QuickModelDraft>(null);
   const [contextDraft, setContextDraft] = useState<ContextDraft>(defaultContext);
   const [contextDirty, setContextDirty] = useState(false);
@@ -112,6 +120,7 @@ export default function App() {
   const routeAuditRunId = useRef(0);
   const routeAuditStopRequested = useRef(false);
   const pendingBackupRestoreAt = useRef<number | undefined>(undefined);
+  const deepValidationInFlight = useRef(false);
 
   const profiles = bootstrap.data?.profiles ?? [];
   const selectedProfile = useMemo(
@@ -224,6 +233,7 @@ export default function App() {
     onSuccess: async (profile) => {
       invalidateRouteAudit();
       clearConnectionCheck(profile.id);
+      clearDeepValidation(profile.id);
       await refresh();
       await refreshModelCache(profile.id);
       setSelectedId(profile.id);
@@ -247,8 +257,9 @@ export default function App() {
   });
   const deleteProfile = useMutation({
     mutationFn: api.deleteProfile,
-    onSuccess: async () => {
+    onSuccess: async (_result, profileId) => {
       invalidateRouteAudit();
+      clearDeepValidation(profileId);
       await refresh();
       setQuickModelDraft(null);
       setConfirmAction(null);
@@ -261,6 +272,7 @@ export default function App() {
     onSuccess: async (result) => {
       invalidateRouteAudit();
       setConnectionChecks({});
+      setDeepValidationChecks({});
       await refresh();
       const last = result.profiles.at(-1);
       if (last) setSelectedId(last.id);
@@ -273,6 +285,7 @@ export default function App() {
     mutationFn: api.importCurrent,
     onSuccess: async (profile) => {
       invalidateRouteAudit();
+      setDeepValidationChecks({});
       await refresh();
       setSelectedId(profile.id);
       setQuickModelDraft(null);
@@ -320,12 +333,41 @@ export default function App() {
       setNotice({ tone: "error", text: `连接检查失败：${message}` });
     },
   });
+  const deepValidateProfile = useMutation({
+    mutationFn: async (profile: ProfileSummary) => ({
+      profileId: profile.id,
+      result: await api.deepValidateProfile(profile.id),
+    }),
+    onMutate: (profile) => {
+      storeDeepValidation(profile.id, { state: "running" });
+      setNotice({ tone: "warning", text: "正在发送真实模型验证请求；完成前无法取消" });
+    },
+    onSuccess: ({ profileId, result }) => {
+      storeDeepValidation(profileId, { state: "result", result });
+      const presentation = deepValidationPresentation({ state: "result", result });
+      setNotice({
+        tone: result.status === "success" ? "success" : "error",
+        text: result.status === "success"
+          ? `深度验证通过，真实请求耗时 ${presentation.duration}`
+          : `深度验证失败：${presentation.category}`,
+      });
+    },
+    onError: (error, profile) => {
+      const message = messageFor(error);
+      storeDeepValidation(profile.id, { state: "invoke_error", message, checkedAtUnixMs: Date.now() });
+      setNotice({ tone: "error", text: `深度验证未完成：${message}` });
+    },
+    onSettled: () => {
+      deepValidationInFlight.current = false;
+    },
+  });
   const updateQuickModel = useMutation({
     mutationFn: ({ profile, model }: { profile: ProfileSummary; model: string; applyAfter: boolean }) =>
       api.updateProfile(profile.id, { ...profileSummaryToDraft(profile), model: model.trim() }),
     onSuccess: async (profile, variables) => {
       invalidateRouteAudit();
       clearConnectionCheck(profile.id);
+      clearDeepValidation(profile.id);
       await refresh();
       await refreshModelCache(profile.id);
       setSelectedId(profile.id);
@@ -402,6 +444,7 @@ export default function App() {
       setSelectedId(response.profile.id);
       setQuickModelDraft(null);
       setConnectionChecks({});
+      setDeepValidationChecks({});
       if (deferredSelectionId) {
         setSelectedId(deferredSelectionId);
         setDeferredSelectionId(undefined);
@@ -499,6 +542,7 @@ export default function App() {
 
   function changeQuickModel(value: string) {
     if (busy || !selectedProfile) return;
+    clearDeepValidation(selectedProfile.id);
     setQuickModelDraft({ profileId: selectedProfile.id, value });
     setNotice({
       tone: "warning",
@@ -526,6 +570,18 @@ export default function App() {
     if (busy || !selectedProfile) return;
     if (!ensureQuickModelSaved()) return;
     checkConnection.mutate(selectedProfile);
+  }
+
+  function runDeepValidation() {
+    if (deepValidationInFlight.current || busy || !selectedProfile) return;
+    if (!ensureQuickModelSaved()) return;
+    const issue = profileConfigurationIssue(selectedProfile);
+    if (issue) {
+      setNotice({ tone: "warning", text: `无法深度验证：${issue}` });
+      return;
+    }
+    deepValidationInFlight.current = true;
+    deepValidateProfile.mutate(selectedProfile);
   }
 
   async function probeProfileConnection(profile: ProfileSummary): Promise<Extract<ConnectionCheck, { state: "success" }>> {
@@ -695,6 +751,19 @@ export default function App() {
     setConnectionChecks((checks) => ({ ...checks, [profileId]: connection }));
   }
 
+  function storeDeepValidation(profileId: string, check: DeepValidationCheck) {
+    setDeepValidationChecks((current) => ({ ...current, [profileId]: check }));
+  }
+
+  function clearDeepValidation(profileId: string) {
+    setDeepValidationChecks((current) => {
+      if (!(profileId in current)) return current;
+      const next = { ...current };
+      delete next[profileId];
+      return next;
+    });
+  }
+
   function mergeAuditConnection(profileId: string, connection: ConnectionCheck) {
     setRouteAuditSession((current) => {
       if (!current || !current.entries.some((entry) => entry.id === profileId)) return current;
@@ -730,6 +799,7 @@ export default function App() {
     exportProfiles.isPending ||
     prepareApply.isPending ||
     checkConnection.isPending ||
+    deepValidateProfile.isPending ||
     routeAuditBusy ||
     updateQuickModel.isPending ||
     continueAction.isPending ||
@@ -919,7 +989,7 @@ export default function App() {
               <Tab label="用量" active={page === "usage"} onClick={() => changePage("usage")} />
             </nav>
             <section className="legacy-page-content">
-              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} usage={todayUsage.data} usageLoading={todayUsage.isLoading} usageError={todayUsage.error} connection={connectionChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} locked={busy} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} onPageChange={changePage} />}
+              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} usage={todayUsage.data} usageLoading={todayUsage.isLoading} usageError={todayUsage.error} connection={connectionChecks[selectedProfile.id]} deepValidation={deepValidationChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} locked={busy} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onDeepValidate={runDeepValidation} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} onPageChange={changePage} />}
               {page === "context" && <ContextPage context={context.data} draft={contextDraft} dirty={contextDirty} loading={context.isLoading} onChange={(next) => { setContextDraft(next); setContextDirty(true); }} />}
               {page === "usage" && <UsagePage usage={usage.data} loading={usage.isLoading} error={usage.error} period={usagePeriod} onPeriod={setUsagePeriod} />}
             </section>
@@ -979,7 +1049,7 @@ function RouteBand({ profile, context, connection }: { profile: ProfileSummary; 
   </div>;
 }
 
-function RelayPage({ profile, context, modelCache, usage, usageLoading, usageError, connection, modelDraft, modelDirty, modelSaving, locked, onModelDraft, onResetModel, onSaveModel, onCheck, onCopyUrl, onEdit, onPageChange }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; usage?: UsageView; usageLoading: boolean; usageError: unknown; connection?: ConnectionCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; locked: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onCopyUrl: () => void; onEdit: () => void; onPageChange: (page: Page) => void }) {
+function RelayPage({ profile, context, modelCache, usage, usageLoading, usageError, connection, deepValidation, modelDraft, modelDirty, modelSaving, locked, onModelDraft, onResetModel, onSaveModel, onCheck, onDeepValidate, onCopyUrl, onEdit, onPageChange }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; usage?: UsageView; usageLoading: boolean; usageError: unknown; connection?: ConnectionCheck; deepValidation?: DeepValidationCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; locked: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onDeepValidate: () => void; onCopyUrl: () => void; onEdit: () => void; onPageChange: (page: Page) => void }) {
   const todayUsage = usageLoading
     ? "正在读取本地用量数据"
     : usageError
@@ -1038,6 +1108,7 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
           {readiness.map((item) => <ReadinessItem key={item.label} {...item} />)}
         </div>
         <ConnectionResult connection={connection} />
+        <DeepValidationPanel profile={profile} check={deepValidation} modelDirty={modelDirty} locked={locked} onValidate={onDeepValidate} />
       </aside>
     </div>
     <div className="legacy-console-previews">
@@ -1067,6 +1138,28 @@ function ConnectionResult({ connection }: { connection?: ConnectionCheck }) {
   if (connection.state === "checking") return <div className="legacy-connection-result checking"><RefreshCw className="spin" size={15} /><div><span>正在连接中转站</span><small>读取模型目录并验证已保存凭据。</small></div></div>;
   if (connection.state === "error") return <div className="legacy-connection-result error"><CircleAlert size={15} /><div><span>连接检查失败</span><small>{connection.message}</small></div></div>;
   return <div className="legacy-connection-result success"><CircleCheck size={15} /><div><span>连接正常 · {connection.latencyMs} ms</span><small>{connection.models.models.length} 个模型 · {formatCheckTime(connection.checkedAt)}</small></div></div>;
+}
+
+function DeepValidationPanel({ profile, check, modelDirty, locked, onValidate }: { profile: ProfileSummary; check?: DeepValidationCheck; modelDirty: boolean; locked: boolean; onValidate: () => void }) {
+  const issue = profileConfigurationIssue(profile);
+  const running = check?.state === "running";
+  const presentation = check ? deepValidationPresentation(check) : undefined;
+  const disabledReason = running
+    ? "真实模型请求进行中，完成前无法取消"
+    : modelDirty
+      ? "请先保存或撤销默认模型修改"
+      : issue;
+  return <section className="legacy-deep-validation" aria-label="深度验证">
+    <header>
+      <div><strong>深度验证</strong><span>向已保存的默认模型发送一次最小真实请求，可能消耗少量额度并产生费用。不应用配置，输出正文不会显示或保存。</span></div>
+      <button className="legacy-command-button" type="button" title={disabledReason} disabled={locked || modelDirty || Boolean(issue)} onClick={onValidate}><Send size={14} />{deepValidationActionLabel(check)}</button>
+    </header>
+    {presentation ? <div className={`legacy-deep-validation-result ${presentation.tone}`} role={presentation.tone === "error" ? "alert" : "status"} aria-live="polite">
+      {presentation.tone === "checking" ? <RefreshCw className="spin" size={16} /> : presentation.tone === "success" ? <CircleCheck size={16} /> : <CircleAlert size={16} />}
+      <div><strong>{presentation.title}</strong><span>安全类别 · {presentation.category}</span>{presentation.detail ? <small>{presentation.detail}</small> : null}{presentation.usage ? <small>{presentation.usage} · 输出正文不会显示或保存</small> : null}</div>
+      {presentation.duration || presentation.checkedAt ? <div className="legacy-deep-validation-metrics">{presentation.duration ? <strong><span>真实请求耗时</span>{presentation.duration}</strong> : null}{presentation.checkedAt ? <time>{presentation.checkedAt}</time> : null}</div> : null}
+    </div> : null}
+  </section>;
 }
 
 function ContextPage({ context, draft, dirty, loading, onChange }: { context?: ContextView; draft: ContextDraft; dirty: boolean; loading: boolean; onChange: (next: ContextDraft) => void }) {

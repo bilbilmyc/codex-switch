@@ -1,19 +1,16 @@
 use std::collections::BTreeSet;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reqwest::blocking::Client;
 use reqwest::header::ACCEPT;
-use reqwest::redirect::Policy;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
 use crate::domain::{Profile, ProfileId};
 use crate::durable_fs::{self, DurableFsError};
+use crate::openai_http::{self, ResponseReadError};
 
-const MAX_RESPONSE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MODELS: usize = 2_000;
 const MAX_MODEL_ID_BYTES: usize = 256;
 
@@ -57,11 +54,7 @@ struct ModelRecord {
 
 pub fn fetch_models(profile: &Profile) -> Result<ModelCache, ModelError> {
     let endpoint = models_endpoint(&profile.base_url)?;
-    let client = Client::builder()
-        .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(15))
-        .redirect(Policy::none())
-        .build()?;
+    let client = openai_http::client(Duration::from_secs(15))?;
     let api_key = profile.api_key.as_ref().ok_or(ModelError::MissingApiKey)?;
     let response = client
         .get(endpoint)
@@ -73,14 +66,13 @@ pub fn fetch_models(profile: &Profile) -> Result<ModelCache, ModelError> {
         return Err(ModelError::HttpStatus(response.status().as_u16()));
     }
 
-    let mut limited = response.take(MAX_RESPONSE_BYTES + 1);
-    let mut bytes = Vec::new();
-    limited
-        .read_to_end(&mut bytes)
-        .map_err(|_| ModelError::InvalidResponse)?;
-    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err(ModelError::ResponseTooLarge);
-    }
+    let bytes =
+        openai_http::read_limited(response, openai_http::MAX_RESPONSE_BYTES).map_err(|error| {
+            match error {
+                ResponseReadError::TooLarge => ModelError::ResponseTooLarge,
+                ResponseReadError::Io => ModelError::InvalidResponse,
+            }
+        })?;
 
     let models = parse_model_response(&bytes)?;
     Ok(ModelCache {
@@ -123,25 +115,7 @@ pub fn cache_path(cache_dir: &Path, profile_id: ProfileId) -> PathBuf {
 }
 
 pub fn models_endpoint(base_url: &str) -> Result<Url, ModelError> {
-    let mut url = Url::parse(base_url).map_err(|_| ModelError::InvalidBaseUrl)?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return Err(ModelError::InvalidBaseUrl);
-    }
-
-    {
-        let mut segments = url
-            .path_segments_mut()
-            .map_err(|_| ModelError::InvalidBaseUrl)?;
-        segments.pop_if_empty();
-        segments.push("models");
-    }
-    Ok(url)
+    openai_http::endpoint(base_url, "models").map_err(|_| ModelError::InvalidBaseUrl)
 }
 
 fn parse_model_response(bytes: &[u8]) -> Result<Vec<String>, ModelError> {

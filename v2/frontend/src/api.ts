@@ -6,6 +6,7 @@ import type {
   Bootstrap,
   ContextDraft,
   ContextView,
+  DeepValidationResult,
   ModelListView,
   ProfileDraft,
   ProfileSummary,
@@ -206,6 +207,15 @@ export const api = {
     if (isTauri) return invoke<ModelListView>("refresh_models", { profileId, draft });
     const models = [...new Set([draft.model, "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"].filter(Boolean))];
     return { models, cacheLabel: `刚刚获取了 ${models.length} 个模型` };
+  },
+  async deepValidateProfile(profileId: string): Promise<DeepValidationResult> {
+    if (isTauri) return invoke<DeepValidationResult>("deep_validate_profile", { profileId });
+    await new Promise((resolve) => window.setTimeout(resolve, 650));
+    const profile = previewProfiles.find((item) => item.id === profileId);
+    if (!profile) throw new Error("中转站不存在");
+    if (!profile.hasApiKey) return { status: "failed", requestDurationMs: 41, checkedAtUnixMs: Date.now(), errorCategory: "missing_api_key" };
+    if (!profile.baseUrl) return { status: "failed", requestDurationMs: 38, checkedAtUnixMs: Date.now(), errorCategory: "invalid_base_url" };
+    return { status: "success", requestDurationMs: 684, checkedAtUnixMs: Date.now(), usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } };
   },
   async loadBackupCenter(): Promise<BackupCenterView> {
     if (isTauri) return invoke<BackupCenterView>("load_backup_center");

@@ -22,6 +22,7 @@ use crate::models;
 use crate::paths::AppPaths;
 use crate::process;
 use crate::profiles::{ProfileStore, ProfilesDocument};
+use crate::responses_probe::{self, ProbeErrorCategory, ProbeOutcome, ProbeUsage};
 use crate::transaction::{
     BackupApiKeyChange as TransactionBackupApiKeyChange, BackupChange as TransactionBackupChange,
     BackupPreview as TransactionBackupPreview, BackupProjection as TransactionBackupProjection,
@@ -170,6 +171,51 @@ pub struct BackupPreviewView {
 pub struct ModelListView {
     pub models: Vec<String>,
     pub cache_label: String,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepValidationStatus {
+    Success,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeepValidationErrorCategory {
+    MissingApiKey,
+    InvalidBaseUrl,
+    Unauthorized,
+    RateLimited,
+    UpstreamError,
+    RequestTimeout,
+    NetworkError,
+    ResponseTooLarge,
+    InvalidResponse,
+    RequestRejected,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepValidationUsageView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepValidationView {
+    pub status: DeepValidationStatus,
+    pub request_duration_ms: u64,
+    pub checked_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<DeepValidationErrorCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<DeepValidationUsageView>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -638,6 +684,20 @@ impl AppService {
                 format!("已获取 {} 个模型；保存连接后可缓存", cache.models.len())
             },
         })
+    }
+
+    pub fn deep_validate_profile(
+        &self,
+        profile_id: String,
+    ) -> Result<DeepValidationView, ServiceError> {
+        let _operation = self.operation_guard()?;
+        self.migrate_legacy_profiles_if_needed()?;
+        let profile_id = parse_profile_id(&profile_id)?;
+        let document = self.store().load().map_err(ServiceError::profiles)?;
+        let profile = document
+            .get(profile_id)
+            .ok_or_else(|| ServiceError::not_found(profile_id))?;
+        Ok(DeepValidationView::from(responses_probe::probe(profile)))
     }
 
     pub fn load_backup_center(&self) -> Result<BackupCenterView, ServiceError> {
@@ -1622,6 +1682,49 @@ impl From<TransactionBackupApiKeyChange> for BackupApiKeyChangeView {
             TransactionBackupApiKeyChange::Removed => Self::Removed,
             TransactionBackupApiKeyChange::Replaced => Self::Replaced,
             TransactionBackupApiKeyChange::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<ProbeOutcome> for DeepValidationView {
+    fn from(outcome: ProbeOutcome) -> Self {
+        Self {
+            status: if outcome.error.is_none() {
+                DeepValidationStatus::Success
+            } else {
+                DeepValidationStatus::Failed
+            },
+            request_duration_ms: outcome.request_duration_ms,
+            checked_at_unix_ms: outcome.checked_at_unix_ms,
+            error_category: outcome.error.map(DeepValidationErrorCategory::from),
+            usage: outcome.usage.map(DeepValidationUsageView::from),
+        }
+    }
+}
+
+impl From<ProbeErrorCategory> for DeepValidationErrorCategory {
+    fn from(category: ProbeErrorCategory) -> Self {
+        match category {
+            ProbeErrorCategory::MissingApiKey => Self::MissingApiKey,
+            ProbeErrorCategory::InvalidBaseUrl => Self::InvalidBaseUrl,
+            ProbeErrorCategory::Unauthorized => Self::Unauthorized,
+            ProbeErrorCategory::RateLimited => Self::RateLimited,
+            ProbeErrorCategory::UpstreamError => Self::UpstreamError,
+            ProbeErrorCategory::RequestTimeout => Self::RequestTimeout,
+            ProbeErrorCategory::NetworkError => Self::NetworkError,
+            ProbeErrorCategory::ResponseTooLarge => Self::ResponseTooLarge,
+            ProbeErrorCategory::InvalidResponse => Self::InvalidResponse,
+            ProbeErrorCategory::RequestRejected => Self::RequestRejected,
+        }
+    }
+}
+
+impl From<ProbeUsage> for DeepValidationUsageView {
+    fn from(usage: ProbeUsage) -> Self {
+        Self {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.total_tokens,
         }
     }
 }
@@ -2905,6 +3008,80 @@ requires_openai_auth = true
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn deep_validation_serializes_only_safe_result_metadata_and_does_not_mutate_state() {
+        let (_home, service) = service();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let handle = std::thread::spawn(move || {
+            let request = server.recv().unwrap();
+            request
+                .respond(tiny_http::Response::from_string(
+                    r#"{"id":"secret-response-id","object":"response","status":"completed","output":[{"text":"secret-generated-output"}],"usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}"#,
+                ))
+                .unwrap();
+        });
+        let mut profile = draft("Relay A");
+        profile.base_url = format!("http://{address}/v1/");
+        profile.api_key = Some("sk-service-probe-secret".to_owned());
+        profile.model = "secret-model-sentinel".to_owned();
+        let created = service.create_profile(profile).unwrap();
+
+        let view = service.deep_validate_profile(created.id).unwrap();
+        handle.join().unwrap();
+        let value = serde_json::to_value(&view).unwrap();
+        let serialized = serde_json::to_string(&value).unwrap();
+
+        assert_eq!(value["status"], "success");
+        assert!(value["requestDurationMs"].is_u64());
+        assert!(value["checkedAtUnixMs"].as_u64().unwrap() > 0);
+        assert!(value.get("errorCategory").is_none());
+        assert_eq!(value["usage"]["inputTokens"], 3);
+        assert_eq!(value["usage"]["outputTokens"], 1);
+        assert_eq!(value["usage"]["totalTokens"], 4);
+        for secret in [
+            "sk-service-probe-secret",
+            &address.to_string(),
+            "secret-response-id",
+            "secret-generated-output",
+            "secret-model-sentinel",
+        ] {
+            assert!(!serialized.contains(secret));
+            assert!(!format!("{view:?}").contains(secret));
+        }
+        assert!(!service.paths.state.exists());
+        assert!(!service.paths.model_cache_dir.exists());
+    }
+
+    #[test]
+    fn failed_deep_validation_has_a_safe_category_and_no_usage() {
+        let (_home, service) = service();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let handle = std::thread::spawn(move || {
+            let request = server.recv().unwrap();
+            request
+                .respond(
+                    tiny_http::Response::from_string("secret unauthorized response")
+                        .with_status_code(401),
+                )
+                .unwrap();
+        });
+        let mut profile = draft("Relay A");
+        profile.base_url = format!("http://{address}/v1");
+        let created = service.create_profile(profile).unwrap();
+
+        let view = service.deep_validate_profile(created.id).unwrap();
+        handle.join().unwrap();
+        let value = serde_json::to_value(&view).unwrap();
+        let serialized = serde_json::to_string(&value).unwrap();
+
+        assert_eq!(value["status"], "failed");
+        assert_eq!(value["errorCategory"], "unauthorized");
+        assert!(value.get("usage").is_none());
+        assert!(!serialized.contains("secret unauthorized response"));
     }
 
     #[test]
