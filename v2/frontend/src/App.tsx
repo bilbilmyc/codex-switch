@@ -29,6 +29,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { api } from "./api";
+import { BackupCenterDialog, formatBackupLocalTime } from "./BackupCenterDialog";
 import {
   emptyProfileForm,
   profileSchema,
@@ -64,7 +65,7 @@ import type {
 
 type Page = "relay" | "context" | "usage";
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
-type ConfirmAction = "delete" | "restore" | "export" | null;
+type ConfirmAction = "delete" | "export" | null;
 type PendingSelection = { profileId: string } | null;
 type EditorSession = { mode: "create" } | { mode: "edit"; profile: ProfileSummary };
 type QuickModelDraft = { profileId: string; value: string } | null;
@@ -92,6 +93,7 @@ export default function App() {
   const [notice, setNotice] = useState<Notice>(null);
   const [profileQuery, setProfileQuery] = useState("");
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
+  const [backupCenterOpen, setBackupCenterOpen] = useState(false);
   const [routeAuditOpen, setRouteAuditOpen] = useState(false);
   const [routeAuditStatus, setRouteAuditStatus] = useState<RouteAuditStatus>("idle");
   const [routeAuditSession, setRouteAuditSession] = useState<RouteAuditSession>();
@@ -109,6 +111,7 @@ export default function App() {
   const closeAfterQuickModelSave = useRef(false);
   const routeAuditRunId = useRef(0);
   const routeAuditStopRequested = useRef(false);
+  const pendingBackupRestoreAt = useRef<number | undefined>(undefined);
 
   const profiles = bootstrap.data?.profiles ?? [];
   const selectedProfile = useMemo(
@@ -186,6 +189,10 @@ export default function App() {
     queryClient.invalidateQueries({ queryKey: ["context", selectedProfile?.id] });
   const refreshModelCache = async (profileId?: string) =>
     queryClient.invalidateQueries({ queryKey: ["model-cache", profileId ?? selectedProfile?.id] });
+  const refreshBackups = async () => {
+    await queryClient.invalidateQueries({ queryKey: ["backup-center"] });
+    await queryClient.invalidateQueries({ queryKey: ["backup-preview"] });
+  };
   const closeWindow = useCallback(() => {
     allowWindowClose.current = true;
     if (!isTauriRuntime()) {
@@ -348,7 +355,15 @@ export default function App() {
       setConfirmation(undefined);
       void handleActionResponse(response);
     },
-    onError: (error) => { setCloseAfterContextSave(false); setNotice({ tone: "error", text: messageFor(error) }); },
+    onError: (error) => {
+      const backupRestoreFailed = pendingBackupRestoreAt.current !== undefined;
+      setCloseAfterContextSave(false);
+      setDeferredSelectionId(undefined);
+      setConfirmation(undefined);
+      pendingBackupRestoreAt.current = undefined;
+      if (backupRestoreFailed) void refreshBackups();
+      setNotice({ tone: "error", text: messageFor(error) });
+    },
   });
   const saveContext = useMutation({
     mutationFn: (draft: ContextDraft) => api.saveContext(selectedProfile!.id, draft),
@@ -358,12 +373,10 @@ export default function App() {
     },
     onError: (error) => { setCloseAfterContextSave(false); setDeferredSelectionId(undefined); setNotice({ tone: "error", text: messageFor(error) }); },
   });
-  const prepareRestore = useMutation({
-    mutationFn: api.prepareRestore,
-    onSuccess: (response) => {
-      setConfirmAction(null);
-      void handleActionResponse(response);
-    },
+  const prepareBackupRestore = useMutation({
+    mutationFn: (values: { backupId: string; liveRevision: string }) =>
+      api.prepareBackupRestore(values.backupId, values.liveRevision),
+    onSuccess: (response) => void handleActionResponse(response),
     onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
   });
   const exportUsage = useMutation({
@@ -402,16 +415,22 @@ export default function App() {
       return;
     }
     if (response.kind === "restored") {
+      const restoredAt = pendingBackupRestoreAt.current;
+      pendingBackupRestoreAt.current = undefined;
+      setBackupCenterOpen(false);
       invalidateRouteAudit();
       await refresh();
       await refreshContext();
       await refreshModelCache();
+      await refreshBackups();
       setQuickModelDraft(null);
       setConnectionChecks({});
       if (response.activeProfileId) setSelectedId(response.activeProfileId);
       setNotice({
         tone: response.warning ? "warning" : "success",
-        text: response.warning ?? "已恢复最近备份",
+        text: response.warning ?? (restoredAt
+          ? `已恢复 ${formatBackupLocalTime(restoredAt)} 的快照；恢复前状态已保存为新的回滚点`
+          : "已恢复备份；恢复前状态已保存为新的回滚点"),
       });
       return;
     }
@@ -705,7 +724,7 @@ export default function App() {
     saveProfile.isPending ||
     duplicateProfile.isPending ||
     deleteProfile.isPending ||
-    prepareRestore.isPending ||
+    prepareBackupRestore.isPending ||
     importProfiles.isPending ||
     importCurrent.isPending ||
     exportProfiles.isPending ||
@@ -723,6 +742,7 @@ export default function App() {
       || confirmAction
       || pendingSelection
       || routeAuditOpen
+      || backupCenterOpen
       || windowCloseQuickModel
       || windowCloseContext,
   );
@@ -866,7 +886,7 @@ export default function App() {
         <footer className="legacy-sidebar-footer">
           <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) importProfiles.mutate(); }}><Upload size={14} />导入</button>
           <button type="button" disabled={profiles.length === 0 || busy} onClick={() => { if (ensureWorkspaceSaved()) setConfirmAction("export"); }}><Download size={14} />导出</button>
-          <button type="button" title={bootstrap.data?.canRestore ? "恢复最近备份" : "尚无可恢复备份"} disabled={!bootstrap.data?.canRestore || busy} onClick={() => { if (ensureWorkspaceSaved()) setConfirmAction("restore"); }}><History size={14} />恢复</button>
+          <button type="button" title="打开备份中心" disabled={bootstrap.isPending || busy} onClick={() => { if (!ensureWorkspaceSaved()) return; prepareBackupRestore.reset(); setBackupCenterOpen(true); }}><History size={14} />恢复</button>
           <span />
           <button type="button" title="关于 Codex Switch" aria-label="关于 Codex Switch" onClick={() => setNotice({ tone: "success", text: "Codex Switch" })}><Info size={16} /></button>
         </footer>
@@ -927,11 +947,11 @@ export default function App() {
 
       <ProfileEditor mode={editorMode} profile={editorProfile} saving={saveProfile.isPending || createProfile.isPending} windowCloseRequest={windowCloseEditorRequest} onDirtyChange={setProfileDirty} onClose={() => { setProfileDirty(false); setEditorSession(undefined); }} onWindowCloseResolved={() => { setProfileDirty(false); setEditorSession(undefined); if (contextDirty) setWindowCloseContext(true); else closeWindow(); }} onSubmit={(profileId, draft) => profileId ? saveProfile.mutateAsync({ profileId, draft }) : createProfile.mutateAsync(draft)} />
       <RouteAuditDialog open={routeAuditOpen} profiles={profiles} session={routeAuditSession} status={routeAuditStatus} locked={busy} onOpenChange={setRouteAuditOpen} actions={{ start: () => void startRouteAudit(), stop: stopRouteAudit, retry: (profile) => void retryRouteAuditProfile(profile), edit: editRouteAuditProfile, apply: applyRouteAuditProfile }} />
+      <BackupCenterDialog open={backupCenterOpen} locked={busy} restorePending={prepareBackupRestore.isPending} restoreError={prepareBackupRestore.error ? messageFor(prepareBackupRestore.error) : undefined} onOpenChange={(open) => { setBackupCenterOpen(open); if (!open) { pendingBackupRestoreAt.current = undefined; prepareBackupRestore.reset(); } }} onClearRestoreError={() => prepareBackupRestore.reset()} onRestore={(backupId, liveRevision, createdAtUnixMs) => { pendingBackupRestoreAt.current = createdAtUnixMs; prepareBackupRestore.mutate({ backupId, liveRevision }); }} />
       <QuickSwitcher open={quickSwitcherOpen} profiles={profiles} selectedId={selectedProfile?.id} onOpenChange={setQuickSwitcherOpen} onSelect={(profileId) => { setQuickSwitcherOpen(false); selectProfile(profileId); }} onCreate={() => { setQuickSwitcherOpen(false); openProfileEditor("create"); }} />
-      <ActionConfirmation confirmation={confirmation} pending={continueAction.isPending} onClose={(token) => { setCloseAfterContextSave(false); setConfirmation(undefined); setDeferredSelectionId(undefined); void api.dismissConfirmation(token); void refreshContext(); }} onChoice={(token, choice) => continueAction.mutate({ token, choice })} />
-      <LegacyConfirm action={confirmAction} pending={deleteProfile.isPending || prepareRestore.isPending || exportProfiles.isPending} onClose={() => setConfirmAction(null)} onConfirm={() => {
+      <ActionConfirmation confirmation={confirmation} pending={continueAction.isPending} onClose={(token) => { setCloseAfterContextSave(false); setConfirmation(undefined); setDeferredSelectionId(undefined); pendingBackupRestoreAt.current = undefined; void api.dismissConfirmation(token); void refreshContext(); }} onChoice={(token, choice) => continueAction.mutate({ token, choice })} />
+      <LegacyConfirm action={confirmAction} pending={deleteProfile.isPending || exportProfiles.isPending} onClose={() => setConfirmAction(null)} onConfirm={() => {
         if (confirmAction === "delete" && selectedProfile) deleteProfile.mutate(selectedProfile.id);
-        if (confirmAction === "restore") prepareRestore.mutate();
         if (confirmAction === "export") exportProfiles.mutate(false);
       }} onExportWithKeys={() => exportProfiles.mutate(true)} />
       <DirtySelectionConfirmation pending={pendingSelection} saving={saveContext.isPending} onClose={() => setPendingSelection(null)} onDiscard={() => { if (!pendingSelection) return; setSelectedId(pendingSelection.profileId); setPendingSelection(null); setContextDirty(false); setPage("relay"); }} onSave={() => { if (!pendingSelection) return; setDeferredSelectionId(pendingSelection.profileId); setPendingSelection(null); saveContext.mutate(contextDraft); }} />
@@ -1240,7 +1260,7 @@ function ActionConfirmation({ confirmation, pending, onClose, onChoice }: { conf
 }
 
 function LegacyConfirm({ action, pending, onClose, onConfirm, onExportWithKeys }: { action: ConfirmAction; pending: boolean; onClose: () => void; onConfirm: () => void; onExportWithKeys: () => void }) {
-  const copy = action === "delete" ? ["删除中转站", "只会删除工具保存的中转站，不会修改当前 Codex 配置。", "删除"] : action === "restore" ? ["恢复最近备份", "恢复会同时还原 config.toml 和 auth.json，并先为当前文件再创建一份备份。", "继续恢复"] : ["导出中转站", "默认导出不包含 API Key。", "导出（不含 Key）"];
+  const copy = action === "delete" ? ["删除中转站", "只会删除工具保存的中转站，不会修改当前 Codex 配置。", "删除"] : ["导出中转站", "默认导出不包含 API Key。", "导出（不含 Key）"];
   return <Dialog.Root open={Boolean(action)} onOpenChange={(open) => !open && onClose()}><Dialog.Portal><Dialog.Overlay className="legacy-dialog-overlay" /><Dialog.Content className="legacy-confirm-dialog"><CircleAlert size={21} /><Dialog.Title>{copy[0]}</Dialog.Title><Dialog.Description>{copy[1]}</Dialog.Description><footer><Dialog.Close asChild><button className="legacy-command-button" type="button">取消</button></Dialog.Close>{action === "export" && <button className="legacy-command-button" type="button" disabled={pending} onClick={onExportWithKeys}>包含 Key 导出</button>}<button className={action === "delete" ? "legacy-command-button danger" : "legacy-command-button primary"} type="button" disabled={pending} onClick={onConfirm}>{pending ? "正在处理" : copy[2]}</button></footer></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 

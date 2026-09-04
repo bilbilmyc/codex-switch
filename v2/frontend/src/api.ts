@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   ApplyResponse,
+  BackupCenterView,
+  BackupPreview,
   Bootstrap,
   ContextDraft,
   ContextView,
@@ -10,7 +12,7 @@ import type {
   UsageView,
 } from "./types";
 
-const isTauri = "__TAURI_INTERNALS__" in window;
+const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 let previewProfiles: ProfileSummary[] = [
   {
@@ -26,6 +28,85 @@ let previewProfiles: ProfileSummary[] = [
 ];
 
 let previewLiveProfile = { ...previewProfiles[0] };
+
+const previewBackups: BackupCenterView["backups"] = [
+  {
+    id: "preview-backup-current",
+    createdAtUnixMs: new Date(2026, 8, 4, 18, 42).getTime(),
+    configPresent: true,
+    authPresent: true,
+    statePresent: true,
+    catalogPresent: true,
+  },
+  {
+    id: "preview-backup-previous",
+    createdAtUnixMs: new Date(2026, 8, 3, 23, 10).getTime(),
+    configPresent: true,
+    authPresent: false,
+    statePresent: true,
+    catalogPresent: false,
+  },
+];
+
+const previewBackupPreviews: Record<string, BackupPreview> = {
+  "preview-backup-current": {
+    backup: previewBackups[0],
+    liveRevision: "preview-live-r1",
+    current: {
+      providerName: "团队中转站",
+      baseUrlConfigured: true,
+      model: "gpt-5.2-codex",
+      reviewModel: "gpt-5.2",
+      contextSummary: "272K 窗口 · 输出不限 · 压缩 80%",
+      hasApiKey: true,
+    },
+    target: {
+      providerName: "稳定路由",
+      baseUrlConfigured: true,
+      model: "gpt-5.1-codex",
+      contextSummary: "自动窗口 · 输出不限 · 自动压缩",
+      hasApiKey: true,
+    },
+    managedChanges: {
+      provider: "changed",
+      baseUrl: "changed",
+      model: "changed",
+      reviewModel: "changed",
+      context: "changed",
+      apiKey: "replaced",
+    },
+    fileChanges: { config: true, auth: true, state: true, catalog: true },
+    activeProfile: { id: "preview-relay", name: "稳定路由" },
+  },
+  "preview-backup-previous": {
+    backup: previewBackups[1],
+    liveRevision: "preview-live-r1",
+    current: {
+      providerName: "团队中转站",
+      baseUrlConfigured: true,
+      model: "gpt-5.2-codex",
+      reviewModel: "gpt-5.2",
+      contextSummary: "272K 窗口 · 输出不限 · 压缩 80%",
+      hasApiKey: true,
+    },
+    target: {
+      providerName: "旧中转站",
+      baseUrlConfigured: true,
+      model: "gpt-5",
+      contextSummary: "200K 窗口 · 输出不限 · 压缩 80%",
+      hasApiKey: false,
+    },
+    managedChanges: {
+      provider: "changed",
+      baseUrl: "changed",
+      model: "changed",
+      reviewModel: "changed",
+      context: "changed",
+      apiKey: "removed",
+    },
+    fileChanges: { config: true, auth: true, state: true, catalog: true },
+  },
+};
 
 function toSummary(id: string, draft: ProfileDraft, isActive = false): ProfileSummary {
   return {
@@ -126,8 +207,18 @@ export const api = {
     const models = [...new Set([draft.model, "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"].filter(Boolean))];
     return { models, cacheLabel: `刚刚获取了 ${models.length} 个模型` };
   },
-  async prepareRestore(): Promise<ApplyResponse> {
-    if (isTauri) return invoke<ApplyResponse>("prepare_restore");
+  async loadBackupCenter(): Promise<BackupCenterView> {
+    if (isTauri) return invoke<BackupCenterView>("load_backup_center");
+    return { backups: previewBackups };
+  },
+  async loadBackupPreview(backupId: string): Promise<BackupPreview> {
+    if (isTauri) return invoke<BackupPreview>("load_backup_preview", { backupId });
+    const preview = previewBackupPreviews[backupId];
+    if (!preview) throw new Error("这个预览快照不存在");
+    return preview;
+  },
+  async prepareBackupRestore(backupId: string, liveRevision: string): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("prepare_backup_restore", { backupId, liveRevision });
     return {
       kind: "restored",
       activeProfileId: previewProfiles.find((profile) => profile.isActive)?.id,

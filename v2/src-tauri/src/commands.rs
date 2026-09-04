@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use codex_switch::v2::{
-    AppService, ApplyResponse, Bootstrap, ContextDraft, ContextView, ModelListView, ProfileDraft,
-    ProfileSummary, UsageView,
+    AppService, ApplyResponse, BackupCenterView, BackupPreviewView, Bootstrap, ContextDraft,
+    ContextView, ModelListView, ProfileDraft, ProfileSummary, UsageView,
 };
 use tauri::State;
 
@@ -124,6 +124,42 @@ pub async fn refresh_models(
         .await
         .map_err(|_| "模型刷新任务已中断".to_owned())?
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_backup_center(state: State<'_, AppState>) -> Result<BackupCenterView, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.load_backup_center())
+        .await
+        .map_err(|_| "备份列表读取任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn load_backup_preview(
+    backup_id: String,
+    state: State<'_, AppState>,
+) -> Result<BackupPreviewView, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.load_backup_preview(backup_id))
+        .await
+        .map_err(|_| "备份预览读取任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn prepare_backup_restore(
+    backup_id: String,
+    live_revision: String,
+    state: State<'_, AppState>,
+) -> Result<ApplyResponse, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.prepare_backup_restore(backup_id, live_revision)
+    })
+    .await
+    .map_err(|_| "恢复任务已中断".to_owned())?
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

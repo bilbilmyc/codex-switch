@@ -22,7 +22,12 @@ use crate::models;
 use crate::paths::AppPaths;
 use crate::process;
 use crate::profiles::{ProfileStore, ProfilesDocument};
-use crate::transaction::{ConflictPolicy, TransactionError, TransactionManager};
+use crate::transaction::{
+    BackupApiKeyChange as TransactionBackupApiKeyChange, BackupChange as TransactionBackupChange,
+    BackupPreview as TransactionBackupPreview, BackupProjection as TransactionBackupProjection,
+    BackupSummary as TransactionBackupSummary, ConflictPolicy, TransactionError,
+    TransactionManager,
+};
 use crate::usage::{LegacyUsageWindow, UsagePeriod, UsageScope};
 use crate::usage_store::UsageStore;
 
@@ -68,6 +73,96 @@ pub struct Bootstrap {
     pub profiles: Vec<ProfileSummary>,
     pub can_restore: bool,
     pub startup_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupCenterView {
+    pub backups: Vec<BackupSummaryView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSummaryView {
+    pub id: String,
+    pub created_at_unix_ms: u64,
+    pub config_present: bool,
+    pub auth_present: bool,
+    pub state_present: bool,
+    pub catalog_present: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupProjectionView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_name: Option<String>,
+    pub base_url_configured: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_model: Option<String>,
+    pub context_summary: String,
+    pub has_api_key: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupChangeView {
+    Unchanged,
+    Changed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupApiKeyChangeView {
+    Unchanged,
+    Added,
+    Removed,
+    Replaced,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupManagedChangesView {
+    pub provider: BackupChangeView,
+    pub base_url: BackupChangeView,
+    pub model: BackupChangeView,
+    pub review_model: BackupChangeView,
+    pub context: BackupChangeView,
+    pub api_key: BackupApiKeyChangeView,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupFileChangesView {
+    pub config: bool,
+    pub auth: bool,
+    pub state: bool,
+    pub catalog: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupActiveProfileView {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupPreviewView {
+    pub backup: BackupSummaryView,
+    pub live_revision: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<BackupProjectionView>,
+    pub target: BackupProjectionView,
+    pub managed_changes: BackupManagedChangesView,
+    pub file_changes: BackupFileChangesView,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_profile: Option<BackupActiveProfileView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -227,6 +322,8 @@ enum PendingConfirmation {
         desktop_was_closed: bool,
     },
     RestoreProcess {
+        backup_id: crate::transaction::BackupId,
+        live_revision: String,
         desktop_executable: Option<PathBuf>,
         desktop_only: bool,
     },
@@ -543,18 +640,70 @@ impl AppService {
         })
     }
 
-    pub fn prepare_restore(&self) -> Result<ApplyResponse, ServiceError> {
+    pub fn load_backup_center(&self) -> Result<BackupCenterView, ServiceError> {
         let _operation = self.operation_guard()?;
-        self.prepare_restore_inner()
+        let backups = TransactionManager::new(self.paths.clone())
+            .list_backups()
+            .map_err(ServiceError::backup)?
+            .into_iter()
+            .take(10)
+            .map(BackupSummaryView::from)
+            .collect();
+        Ok(BackupCenterView { backups })
     }
 
-    fn prepare_restore_inner(&self) -> Result<ApplyResponse, ServiceError> {
+    pub fn load_backup_preview(
+        &self,
+        backup_id: String,
+    ) -> Result<BackupPreviewView, ServiceError> {
+        let _operation = self.operation_guard()?;
+        let backup_id = parse_backup_id(&backup_id)?;
+        let preview = TransactionManager::new(self.paths.clone())
+            .preview_backup(backup_id)
+            .map_err(ServiceError::backup)?;
+        self.backup_preview_view(preview)
+    }
+
+    pub fn prepare_restore(&self) -> Result<ApplyResponse, ServiceError> {
+        let _operation = self.operation_guard()?;
+        let manager = TransactionManager::new(self.paths.clone());
+        let backup_id = manager
+            .list_backups()
+            .map_err(ServiceError::backup)?
+            .into_iter()
+            .next()
+            .map(|backup| backup.id)
+            .ok_or_else(ServiceError::no_backup)?;
+        let preview = manager
+            .preview_backup(backup_id)
+            .map_err(ServiceError::backup)?;
+        self.prepare_restore_inner(backup_id, preview.live_revision)
+    }
+
+    pub fn prepare_backup_restore(
+        &self,
+        backup_id: String,
+        live_revision: String,
+    ) -> Result<ApplyResponse, ServiceError> {
+        let _operation = self.operation_guard()?;
+        let backup_id = parse_backup_id(&backup_id)?;
+        self.prepare_restore_inner(backup_id, live_revision)
+    }
+
+    fn prepare_restore_inner(
+        &self,
+        backup_id: crate::transaction::BackupId,
+        live_revision: String,
+    ) -> Result<ApplyResponse, ServiceError> {
+        self.ensure_backup_preview_current(backup_id, &live_revision)?;
         let report = process::detect_codex_processes();
         if report.is_clear() {
-            return self.restore_latest(false, None);
+            return self.restore_backup(backup_id, &live_revision, false, None);
         }
         let desktop_only = report.has_desktop() && !report.has_command_line();
         let token = self.remember(PendingConfirmation::RestoreProcess {
+            backup_id,
+            live_revision,
             desktop_executable: report.desktop_executable(),
             desktop_only,
         });
@@ -786,16 +935,20 @@ impl AppService {
                 _ => Err(ServiceError::invalid_confirmation()),
             },
             PendingConfirmation::RestoreProcess {
+                backup_id,
+                live_revision,
                 desktop_executable,
                 desktop_only,
             } => match choice.as_str() {
                 "quit_desktop_and_restore" if desktop_only => {
                     process::quit_desktop_safely(Duration::from_secs(8))
                         .map_err(ServiceError::process)?;
-                    self.restore_latest(true, desktop_executable)
+                    self.restore_backup(backup_id, &live_revision, true, desktop_executable)
                 }
-                "recheck_restore" if !desktop_only => self.prepare_restore_inner(),
-                "restore_anyway" => self.restore_latest(false, None),
+                "recheck_restore" if !desktop_only => {
+                    self.prepare_restore_inner(backup_id, live_revision)
+                }
+                "restore_anyway" => self.restore_backup(backup_id, &live_revision, false, None),
                 _ => Err(ServiceError::invalid_confirmation()),
             },
             PendingConfirmation::ContextProcess {
@@ -1241,12 +1394,69 @@ impl AppService {
         }
     }
 
-    fn restore_latest(
+    fn ensure_backup_preview_current(
         &self,
+        backup_id: crate::transaction::BackupId,
+        expected_live_revision: &str,
+    ) -> Result<(), ServiceError> {
+        let preview = TransactionManager::new(self.paths.clone())
+            .preview_backup(backup_id)
+            .map_err(ServiceError::backup)?;
+        if preview.live_revision != expected_live_revision {
+            return Err(ServiceError::stale_backup_preview());
+        }
+        Ok(())
+    }
+
+    fn backup_preview_view(
+        &self,
+        preview: TransactionBackupPreview,
+    ) -> Result<BackupPreviewView, ServiceError> {
+        let document = self.store().load().map_err(ServiceError::profiles)?;
+        let active_profile = preview.active_profile_id.map(|profile_id| {
+            let name = document
+                .get(profile_id)
+                .map(|profile| profile.name.clone())
+                .or_else(|| preview.target.provider_name.clone())
+                .unwrap_or_else(|| "未知中转站".to_owned());
+            BackupActiveProfileView {
+                id: profile_id.to_string(),
+                name,
+            }
+        });
+
+        Ok(BackupPreviewView {
+            backup: BackupSummaryView::from(preview.backup),
+            live_revision: preview.live_revision,
+            current: preview.current.map(BackupProjectionView::from),
+            target: BackupProjectionView::from(preview.target),
+            managed_changes: BackupManagedChangesView {
+                provider: preview.managed_changes.provider.into(),
+                base_url: preview.managed_changes.base_url.into(),
+                model: preview.managed_changes.model.into(),
+                review_model: preview.managed_changes.review_model.into(),
+                context: preview.managed_changes.context.into(),
+                api_key: preview.managed_changes.api_key.into(),
+            },
+            file_changes: BackupFileChangesView {
+                config: preview.file_changes.config,
+                auth: preview.file_changes.auth,
+                state: preview.file_changes.state,
+                catalog: preview.file_changes.catalog,
+            },
+            active_profile,
+        })
+    }
+
+    fn restore_backup(
+        &self,
+        backup_id: crate::transaction::BackupId,
+        expected_live_revision: &str,
         desktop_was_closed: bool,
         desktop_executable: Option<PathBuf>,
     ) -> Result<ApplyResponse, ServiceError> {
-        let result = TransactionManager::new(self.paths.clone()).restore_latest();
+        let result = TransactionManager::new(self.paths.clone())
+            .restore_backup(backup_id, expected_live_revision);
         match result {
             Ok(outcome) => {
                 let warning = desktop_was_closed
@@ -1258,10 +1468,15 @@ impl AppService {
                     warning,
                 })
             }
+            Err(TransactionError::StaleBackupPreview { .. }) => {
+                let _ = desktop_was_closed
+                    .then(|| process::relaunch_desktop(desktop_executable.as_deref()));
+                Err(ServiceError::stale_backup_preview())
+            }
             Err(error) => {
                 let _ = desktop_was_closed
                     .then(|| process::relaunch_desktop(desktop_executable.as_deref()));
-                Err(ServiceError::transaction(error))
+                Err(ServiceError::backup(error))
             }
         }
     }
@@ -1359,6 +1574,54 @@ impl ProfileSummary {
             has_api_key: profile.api_key.is_some(),
             is_active,
             apply_state,
+        }
+    }
+}
+
+impl From<TransactionBackupSummary> for BackupSummaryView {
+    fn from(summary: TransactionBackupSummary) -> Self {
+        Self {
+            id: summary.id.to_string(),
+            created_at_unix_ms: summary.created_at_unix_ms,
+            config_present: summary.config_present,
+            auth_present: summary.auth_present,
+            state_present: summary.state_present,
+            catalog_present: summary.catalog_present,
+        }
+    }
+}
+
+impl From<TransactionBackupProjection> for BackupProjectionView {
+    fn from(projection: TransactionBackupProjection) -> Self {
+        Self {
+            provider_name: projection.provider_name,
+            base_url_configured: projection.base_url.is_some(),
+            model: projection.model,
+            review_model: projection.review_model,
+            context_summary: context_summary(projection.context.into()),
+            has_api_key: projection.has_api_key,
+        }
+    }
+}
+
+impl From<TransactionBackupChange> for BackupChangeView {
+    fn from(change: TransactionBackupChange) -> Self {
+        match change {
+            TransactionBackupChange::Unchanged => Self::Unchanged,
+            TransactionBackupChange::Changed => Self::Changed,
+            TransactionBackupChange::Unknown => Self::Unknown,
+        }
+    }
+}
+
+impl From<TransactionBackupApiKeyChange> for BackupApiKeyChangeView {
+    fn from(change: TransactionBackupApiKeyChange) -> Self {
+        match change {
+            TransactionBackupApiKeyChange::Unchanged => Self::Unchanged,
+            TransactionBackupApiKeyChange::Added => Self::Added,
+            TransactionBackupApiKeyChange::Removed => Self::Removed,
+            TransactionBackupApiKeyChange::Replaced => Self::Replaced,
+            TransactionBackupApiKeyChange::Unknown => Self::Unknown,
         }
     }
 }
@@ -1531,6 +1794,10 @@ fn parse_profile_id(value: &str) -> Result<ProfileId, ServiceError> {
     value
         .parse()
         .map_err(|_| ServiceError::invalid_profile_id())
+}
+
+fn parse_backup_id(value: &str) -> Result<crate::transaction::BackupId, ServiceError> {
+    value.parse().map_err(|_| ServiceError::invalid_backup_id())
 }
 
 fn managed_live_profile_id(paths: &AppPaths) -> Option<ProfileId> {
@@ -1943,6 +2210,14 @@ pub enum ServiceError {
     NotFound,
     #[error("中转站标识无效")]
     InvalidProfileId,
+    #[error("备份标识无效")]
+    InvalidBackupId,
+    #[error("没有可用的备份")]
+    NoBackup,
+    #[error("备份无法读取或恢复")]
+    Backup,
+    #[error("备份预览已过期，请重新读取后再恢复")]
+    StaleBackupPreview,
     #[error("确认请求已失效，请重新操作")]
     InvalidConfirmation,
     #[error("内部状态暂时不可用，请重新操作")]
@@ -1988,6 +2263,22 @@ impl ServiceError {
 
     fn invalid_profile_id() -> Self {
         Self::InvalidProfileId
+    }
+
+    fn invalid_backup_id() -> Self {
+        Self::InvalidBackupId
+    }
+
+    fn no_backup() -> Self {
+        Self::NoBackup
+    }
+
+    fn backup(_error: impl std::fmt::Display) -> Self {
+        Self::Backup
+    }
+
+    fn stale_backup_preview() -> Self {
+        Self::StaleBackupPreview
     }
 
     fn invalid_confirmation() -> Self {
@@ -2298,6 +2589,175 @@ requires_openai_auth = true
             assert_eq!(value["applyState"], expected);
             assert!(value.get("isApplied").is_none());
         }
+    }
+
+    #[test]
+    fn backup_preview_json_is_redacted_and_has_a_stable_shape() {
+        let (_home, service) = service();
+        let mut first_draft = draft("Relay Secret");
+        first_draft.base_url = "https://secret-url-sentinel.example/v1".to_owned();
+        first_draft.api_key = Some("sk-secret-preview-sentinel".to_owned());
+        let first = service.create_profile(first_draft).unwrap();
+        let second = service.create_profile(draft("Relay B")).unwrap();
+        let document = service.store().load().unwrap();
+        let manager = TransactionManager::new(service.paths.clone());
+        manager
+            .apply(
+                &document
+                    .get(first.id.parse().unwrap())
+                    .unwrap()
+                    .activation()
+                    .unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let captured_first = manager
+            .apply(
+                &document
+                    .get(second.id.parse().unwrap())
+                    .unwrap()
+                    .activation()
+                    .unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap()
+            .backup;
+
+        let view = service
+            .load_backup_preview(captured_first.id.to_string())
+            .unwrap();
+        let value = serde_json::to_value(&view).unwrap();
+        let serialized = serde_json::to_string(&value).unwrap();
+        let key_hash = codex_config::relevant_projection(
+            "",
+            Some(br#"{"OPENAI_API_KEY":"sk-secret-preview-sentinel"}"#),
+        )
+        .unwrap()
+        .auth_api_key_sha256
+        .unwrap();
+
+        assert!(!serialized.contains("sk-secret-preview-sentinel"));
+        assert!(!serialized.contains("secret-url-sentinel"));
+        assert!(!serialized.contains(&key_hash));
+        assert_eq!(value["target"]["baseUrlConfigured"], true);
+        assert!(value["target"].get("baseUrl").is_none());
+        for field in ["config", "auth", "state", "catalog"] {
+            assert!(value["fileChanges"][field].is_boolean());
+        }
+        assert_eq!(value["activeProfile"]["id"], first.id);
+        assert_eq!(value["activeProfile"]["name"], "Relay Secret");
+        assert!(value["liveRevision"].is_string());
+
+        let center = serde_json::to_value(service.load_backup_center().unwrap()).unwrap();
+        let summary = &center["backups"][0];
+        assert!(summary["configPresent"].is_boolean());
+        assert!(summary["authPresent"].is_boolean());
+        assert!(summary["statePresent"].is_boolean());
+        assert!(summary["catalogPresent"].is_boolean());
+    }
+
+    #[test]
+    fn backup_restore_confirmation_keeps_the_selected_id() {
+        let (_home, service) = service();
+        let original_config = b"model = \"original-model\"\n";
+        durable_fs::atomic_write(&service.paths.codex_config, original_config).unwrap();
+        let first = service.create_profile(draft("Relay A")).unwrap();
+        let second = service.create_profile(draft("Relay B")).unwrap();
+        let third = service.create_profile(draft("Relay C")).unwrap();
+        let document = service.store().load().unwrap();
+        let manager = TransactionManager::new(service.paths.clone());
+        let selected = manager
+            .apply(
+                &document
+                    .get(first.id.parse().unwrap())
+                    .unwrap()
+                    .activation()
+                    .unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap()
+            .backup;
+        manager
+            .apply(
+                &document
+                    .get(second.id.parse().unwrap())
+                    .unwrap()
+                    .activation()
+                    .unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let preview = manager.preview_backup(selected.id).unwrap();
+        let live_before_confirmation = [
+            service.paths.codex_config.clone(),
+            service.paths.codex_auth.clone(),
+            service.paths.state.clone(),
+            service.paths.managed_model_catalog.clone(),
+        ]
+        .map(|path| {
+            let contents = durable_fs::read_optional(&path).unwrap();
+            (path, contents)
+        });
+        let token = service.remember(PendingConfirmation::RestoreProcess {
+            backup_id: selected.id,
+            live_revision: preview.live_revision,
+            desktop_executable: None,
+            desktop_only: false,
+        });
+
+        manager
+            .apply(
+                &document
+                    .get(third.id.parse().unwrap())
+                    .unwrap()
+                    .activation()
+                    .unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        for (path, contents) in live_before_confirmation {
+            match contents {
+                Some(contents) => durable_fs::atomic_write(&path, &contents).unwrap(),
+                None => durable_fs::atomic_remove(&path).unwrap(),
+            }
+        }
+
+        let response = service
+            .continue_apply(token, "restore_anyway".to_owned())
+            .unwrap();
+
+        assert!(matches!(response, ApplyResponse::Restored { .. }));
+        assert_eq!(
+            fs::read(&service.paths.codex_config).unwrap(),
+            original_config
+        );
+    }
+
+    #[test]
+    fn selected_restore_rejects_a_stale_backup_preview() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        let backup = TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap()
+            .backup;
+        let preview = service.load_backup_preview(backup.id.to_string()).unwrap();
+        durable_fs::atomic_write(
+            &service.paths.codex_config,
+            b"model = \"changed-after-preview\"\n",
+        )
+        .unwrap();
+
+        let error = service
+            .prepare_backup_restore(backup.id.to_string(), preview.live_revision)
+            .unwrap_err();
+
+        assert!(matches!(error, ServiceError::StaleBackupPreview));
     }
 
     #[test]

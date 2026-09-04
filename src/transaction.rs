@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::str;
+use std::str::{self, FromStr};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,14 @@ impl BackupId {
     }
 }
 
+impl FromStr for BackupId {
+    type Err = uuid::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(value).map(Self)
+    }
+}
+
 impl std::fmt::Display for BackupId {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(formatter)
@@ -62,6 +70,63 @@ pub struct BackupSummary {
     pub created_at_unix_ms: u64,
     pub config_present: bool,
     pub auth_present: bool,
+    pub state_present: bool,
+    pub catalog_present: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupProjection {
+    pub provider_name: Option<String>,
+    pub base_url: Option<String>,
+    pub model: Option<String>,
+    pub review_model: Option<String>,
+    pub context: ContextSettings,
+    pub has_api_key: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupChange {
+    Unchanged,
+    Changed,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackupApiKeyChange {
+    Unchanged,
+    Added,
+    Removed,
+    Replaced,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupManagedChanges {
+    pub provider: BackupChange,
+    pub base_url: BackupChange,
+    pub model: BackupChange,
+    pub review_model: BackupChange,
+    pub context: BackupChange,
+    pub api_key: BackupApiKeyChange,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupFileChanges {
+    pub config: bool,
+    pub auth: bool,
+    pub state: bool,
+    pub catalog: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackupPreview {
+    pub backup: BackupSummary,
+    pub live_revision: String,
+    pub current: Option<BackupProjection>,
+    pub target: BackupProjection,
+    pub managed_changes: BackupManagedChanges,
+    pub file_changes: BackupFileChanges,
+    pub active_profile_id: Option<ProfileId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -326,6 +391,15 @@ impl TransactionManager {
         self.list_backups_locked()
     }
 
+    pub fn preview_backup(&self, id: BackupId) -> Result<BackupPreview, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+
+        let (backup, source) = self.read_backup_entry(id)?;
+        let current = self.read_live_snapshot()?;
+        self.preview_backup_locked(backup, source, current)
+    }
+
     /// Returns only the validated, non-sensitive information needed to recover ownership of
     /// usage written before profiles received independent provider IDs.
     pub fn legacy_usage_history(&self) -> Result<LegacyUsageHistory, TransactionError> {
@@ -367,13 +441,99 @@ impl TransactionManager {
         let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
         self.recover_locked()?;
 
-        let restored = self
+        let id = self
             .list_backups_locked()?
             .into_iter()
             .next()
+            .map(|backup| backup.id)
             .ok_or(TransactionError::NoBackup)?;
-        let source = self.read_backup(restored.id)?;
-        let source_config = config_text(&self.paths.codex_config, source.config.as_deref())?;
+        let (restored, source) = self.read_backup_entry(id)?;
+        let current = self.read_live_snapshot()?;
+        self.restore_backup_locked(restored, source, current, None)
+    }
+
+    pub fn restore_backup(
+        &self,
+        id: BackupId,
+        expected_live_revision: &str,
+    ) -> Result<RestoreOutcome, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+
+        let (restored, source) = self.read_backup_entry(id)?;
+        let current = self.read_live_snapshot()?;
+        self.restore_backup_locked(restored, source, current, Some(expected_live_revision))
+    }
+
+    fn preview_backup_locked(
+        &self,
+        backup: BackupSummary,
+        source: Snapshot,
+        current: Snapshot,
+    ) -> Result<BackupPreview, TransactionError> {
+        let live_revision = snapshot_revision(&current);
+        let (target, state, target_projection) = self.restore_target(backup.id, source)?;
+        let current_projection = snapshot_projection(&self.paths.codex_config, &current).ok();
+        let managed_changes =
+            backup_managed_changes(current_projection.as_ref(), &target_projection);
+        let file_changes = BackupFileChanges {
+            config: current.config != target.config,
+            auth: current.auth != target.auth,
+            state: current.state != target.state,
+            catalog: current.catalog != target.catalog,
+        };
+
+        Ok(BackupPreview {
+            backup,
+            live_revision,
+            current: current_projection.as_ref().map(backup_projection),
+            target: backup_projection(&target_projection),
+            managed_changes,
+            file_changes,
+            active_profile_id: state.active_profile_id,
+        })
+    }
+
+    fn restore_backup_locked(
+        &self,
+        restored: BackupSummary,
+        source: Snapshot,
+        current: Snapshot,
+        expected_live_revision: Option<&str>,
+    ) -> Result<RestoreOutcome, TransactionError> {
+        if let Some(expected) = expected_live_revision {
+            let actual = snapshot_revision(&current);
+            if actual != expected {
+                return Err(TransactionError::StaleBackupPreview {
+                    expected_live_revision: expected.to_owned(),
+                    actual_live_revision: actual,
+                });
+            }
+        }
+
+        let (target, state, _) = self.restore_target(restored.id, source)?;
+        let rollback_backup = self.commit_snapshot(
+            TransactionOperation::Restore {
+                source_backup_id: restored.id,
+            },
+            &current,
+            &target,
+        )?;
+
+        Ok(RestoreOutcome {
+            restored,
+            rollback_backup,
+            state,
+        })
+    }
+
+    fn restore_target(
+        &self,
+        source_backup_id: BackupId,
+        source: Snapshot,
+    ) -> Result<(Snapshot, ManagedState, RelevantProjection), TransactionError> {
+        let source_path = self.backup_dir(source_backup_id).join(BACKUP_CONFIG_FILE);
+        let source_config = config_text(&source_path, source.config.as_deref())?;
         let source_projection = relevant_projection(source_config, source.auth.as_deref())?;
         let fingerprint = relevant_fingerprint(source_config, source.auth.as_deref())?;
         let source_state = deserialize_state(source.state.as_deref())?;
@@ -397,20 +557,7 @@ impl TransactionManager {
             state: Some(serialize_json(&state)?),
             catalog: source.catalog,
         };
-        let current = self.read_live_snapshot()?;
-        let rollback_backup = self.commit_snapshot(
-            TransactionOperation::Restore {
-                source_backup_id: restored.id,
-            },
-            &current,
-            &target,
-        )?;
-
-        Ok(RestoreOutcome {
-            restored,
-            rollback_backup,
-            state,
-        })
+        Ok((target, state, source_projection))
     }
 
     fn recover_locked(&self) -> Result<RecoveryOutcome, TransactionError> {
@@ -446,8 +593,12 @@ impl TransactionManager {
         target: &Snapshot,
     ) -> Result<BackupSummary, TransactionError> {
         let expected_live_revisions = LiveRevisions::from_snapshot(current);
+        let protected_backup = match &operation {
+            TransactionOperation::Restore { source_backup_id } => Some(*source_backup_id),
+            TransactionOperation::Apply { .. } | TransactionOperation::UpdateContext => None,
+        };
         self.ensure_live_revisions(&expected_live_revisions)?;
-        self.prune_backups_to_limit(MAX_BACKUPS.saturating_sub(1), None)?;
+        self.prune_backups_to_limit(MAX_BACKUPS.saturating_sub(1), protected_backup)?;
         self.ensure_live_revisions(&expected_live_revisions)?;
 
         let staged_backup = self.stage_backup(current)?;
@@ -711,8 +862,21 @@ impl TransactionManager {
     }
 
     fn read_backup(&self, id: BackupId) -> Result<Snapshot, TransactionError> {
+        self.read_backup_entry(id).map(|(_, snapshot)| snapshot)
+    }
+
+    fn read_backup_entry(
+        &self,
+        id: BackupId,
+    ) -> Result<(BackupSummary, Snapshot), TransactionError> {
+        if path_is_missing(&self.paths.backups_dir)? {
+            return Err(TransactionError::BackupMissing(id));
+        }
         ensure_directory(&self.paths.backups_dir)?;
         let directory = self.backup_dir(id);
+        if path_is_missing(&directory)? {
+            return Err(TransactionError::BackupMissing(id));
+        }
         ensure_directory(&directory)?;
         let manifest_path = directory.join(BACKUP_MANIFEST_FILE);
         ensure_safe_file_target(&manifest_path)?;
@@ -722,12 +886,14 @@ impl TransactionManager {
             .map_err(|source| metadata_error(&manifest_path, source))?;
         manifest.validate(id)?;
 
-        Ok(Snapshot {
+        let summary = BackupSummary::from(&manifest);
+        let snapshot = Snapshot {
             config: read_backup_file(id, &directory.join(BACKUP_CONFIG_FILE), &manifest.config)?,
             auth: read_backup_file(id, &directory.join(BACKUP_AUTH_FILE), &manifest.auth)?,
             state: read_backup_file(id, &directory.join(BACKUP_STATE_FILE), &manifest.state)?,
             catalog: read_backup_file(id, &directory.join(BACKUP_CATALOG_FILE), &manifest.catalog)?,
-        })
+        };
+        Ok((summary, snapshot))
     }
 
     fn list_backups_locked(&self) -> Result<Vec<BackupSummary>, TransactionError> {
@@ -859,6 +1025,102 @@ struct Snapshot {
     catalog: Option<Vec<u8>>,
 }
 
+fn snapshot_projection(
+    config_path: &Path,
+    snapshot: &Snapshot,
+) -> Result<RelevantProjection, TransactionError> {
+    let config = config_text(config_path, snapshot.config.as_deref())?;
+    relevant_projection(config, snapshot.auth.as_deref()).map_err(TransactionError::from)
+}
+
+fn backup_projection(projection: &RelevantProjection) -> BackupProjection {
+    let provider = projection.config.tool_provider.as_ref();
+    BackupProjection {
+        provider_name: provider.map(|provider| provider.name.clone()),
+        base_url: provider.map(|provider| provider.base_url.clone()),
+        model: projection.config.model.clone(),
+        review_model: projection.config.review_model.clone(),
+        context: projection.config.context,
+        has_api_key: projection.auth_api_key_sha256.is_some(),
+    }
+}
+
+fn backup_managed_changes(
+    current: Option<&RelevantProjection>,
+    target: &RelevantProjection,
+) -> BackupManagedChanges {
+    let Some(current) = current else {
+        return BackupManagedChanges {
+            provider: BackupChange::Unknown,
+            base_url: BackupChange::Unknown,
+            model: BackupChange::Unknown,
+            review_model: BackupChange::Unknown,
+            context: BackupChange::Unknown,
+            api_key: BackupApiKeyChange::Unknown,
+        };
+    };
+    let current_provider = current.config.tool_provider.as_ref();
+    let target_provider = target.config.tool_provider.as_ref();
+    let provider_changed = current.config.model_provider != target.config.model_provider
+        || current_provider.map(|provider| {
+            (
+                provider.name.as_str(),
+                provider.wire_api.as_str(),
+                provider.requires_openai_auth,
+            )
+        }) != target_provider.map(|provider| {
+            (
+                provider.name.as_str(),
+                provider.wire_api.as_str(),
+                provider.requires_openai_auth,
+            )
+        });
+
+    BackupManagedChanges {
+        provider: backup_change(provider_changed),
+        base_url: backup_change(
+            current_provider.map(|provider| provider.base_url.as_str())
+                != target_provider.map(|provider| provider.base_url.as_str()),
+        ),
+        model: backup_change(current.config.model != target.config.model),
+        review_model: backup_change(current.config.review_model != target.config.review_model),
+        context: backup_change(current.config.context != target.config.context),
+        api_key: backup_api_key_change(
+            current.auth_api_key_sha256.as_ref(),
+            target.auth_api_key_sha256.as_ref(),
+        ),
+    }
+}
+
+fn backup_change(changed: bool) -> BackupChange {
+    if changed {
+        BackupChange::Changed
+    } else {
+        BackupChange::Unchanged
+    }
+}
+
+fn backup_api_key_change(current: Option<&String>, target: Option<&String>) -> BackupApiKeyChange {
+    match (current, target) {
+        (None, None) => BackupApiKeyChange::Unchanged,
+        (None, Some(_)) => BackupApiKeyChange::Added,
+        (Some(_), None) => BackupApiKeyChange::Removed,
+        (Some(current), Some(target)) if current == target => BackupApiKeyChange::Unchanged,
+        (Some(_), Some(_)) => BackupApiKeyChange::Replaced,
+    }
+}
+
+fn snapshot_revision(snapshot: &Snapshot) -> String {
+    let revisions = [
+        durable_fs::revision(snapshot.config.as_deref()),
+        durable_fs::revision(snapshot.auth.as_deref()),
+        durable_fs::revision(snapshot.state.as_deref()),
+        durable_fs::revision(snapshot.catalog.as_deref()),
+    ]
+    .join("\n");
+    durable_fs::revision(Some(revisions.as_bytes()))
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveRevisions {
     config: String,
@@ -934,6 +1196,8 @@ impl From<&BackupManifest> for BackupSummary {
             created_at_unix_ms: manifest.created_at_unix_ms,
             config_present: manifest.config.present,
             auth_present: manifest.auth.present,
+            state_present: manifest.state.present,
+            catalog_present: manifest.catalog.present,
         }
     }
 }
@@ -1245,6 +1509,11 @@ pub enum TransactionError {
     BackupIdMismatch { expected: BackupId, found: BackupId },
     #[error("backup {id} is corrupt: {file} does not match its manifest")]
     CorruptBackup { id: BackupId, file: String },
+    #[error("backup preview is stale; reload it before restoring")]
+    StaleBackupPreview {
+        expected_live_revision: String,
+        actual_live_revision: String,
+    },
     #[error("refusing to read or replace a symbolic link, reparse point, or non-file path: {0}")]
     UnsafePath(PathBuf),
     #[error("staged Codex validation failed: {0}")]
@@ -1309,6 +1578,15 @@ requires_openai_auth = true
         durable_fs::atomic_write(&paths.codex_auth, ORIGINAL_AUTH).unwrap();
         let manager = TransactionManager::new(paths.clone());
         (temp, paths, manager)
+    }
+
+    #[test]
+    fn backup_id_only_parses_uuid_values() {
+        let id = BackupId::from_str("e519bc8f-120c-43c3-96b5-a7799f6eec18").unwrap();
+
+        assert_eq!(id.to_string(), "e519bc8f-120c-43c3-96b5-a7799f6eec18");
+        assert!(BackupId::from_str("../config.toml").is_err());
+        assert!(BackupId::from_str("C:\\Users\\Soren\\config.toml").is_err());
     }
 
     fn activation(model: &str) -> Activation {
@@ -1781,6 +2059,115 @@ requires_openai_auth = true
         assert_eq!(fs::read(&paths.codex_auth).unwrap(), ORIGINAL_AUTH);
         assert_eq!(outcome.state.active_profile_id, None);
         assert!(manager.has_backup().unwrap());
+    }
+
+    #[test]
+    fn backup_preview_is_redacted_and_reports_managed_and_file_changes() {
+        let (_temp, _paths, manager) = fixture();
+        let applied = manager
+            .apply(&activation("new-model"), ConflictPolicy::Reject)
+            .unwrap();
+
+        let preview = manager.preview_backup(applied.backup.id).unwrap();
+
+        assert_eq!(preview.backup.id, applied.backup.id);
+        assert!(preview.backup.config_present);
+        assert!(preview.backup.auth_present);
+        assert!(!preview.backup.state_present);
+        assert!(!preview.backup.catalog_present);
+        assert_eq!(preview.live_revision.len(), 64);
+        assert_eq!(
+            preview.current.as_ref().unwrap().model.as_deref(),
+            Some("new-model")
+        );
+        assert_eq!(preview.target.model.as_deref(), Some("old-model"));
+        assert_eq!(preview.managed_changes.provider, BackupChange::Changed);
+        assert_eq!(preview.managed_changes.model, BackupChange::Changed);
+        assert_eq!(
+            preview.managed_changes.api_key,
+            BackupApiKeyChange::Replaced
+        );
+        assert!(preview.file_changes.config);
+        assert!(preview.file_changes.auth);
+        assert!(preview.file_changes.state);
+        assert!(!preview.file_changes.catalog);
+        assert!(!format!("{preview:?}").contains("sk-new-secret"));
+        assert!(!format!("{preview:?}").contains("sk-old"));
+    }
+
+    #[test]
+    fn restore_backup_uses_the_selected_id_instead_of_the_latest_backup() {
+        let (_temp, paths, manager) = fixture();
+        let original = manager
+            .apply(&activation("first-model"), ConflictPolicy::Reject)
+            .unwrap()
+            .backup;
+        manager
+            .apply(&activation("second-model"), ConflictPolicy::Reject)
+            .unwrap();
+        let preview = manager.preview_backup(original.id).unwrap();
+
+        let outcome = manager
+            .restore_backup(original.id, &preview.live_revision)
+            .unwrap();
+
+        assert_eq!(outcome.restored.id, original.id);
+        assert_eq!(
+            fs::read(&paths.codex_config).unwrap(),
+            ORIGINAL_CONFIG.as_bytes()
+        );
+        assert_eq!(fs::read(&paths.codex_auth).unwrap(), ORIGINAL_AUTH);
+        assert!(
+            manager
+                .list_backups()
+                .unwrap()
+                .iter()
+                .any(|backup| backup.id == original.id)
+        );
+    }
+
+    #[test]
+    fn restore_backup_rejects_a_stale_live_revision_without_writing() {
+        let (_temp, paths, manager) = fixture();
+        let backup = manager
+            .apply(&activation("managed-model"), ConflictPolicy::Reject)
+            .unwrap()
+            .backup;
+        let preview = manager.preview_backup(backup.id).unwrap();
+        let external = b"model = \"external-after-preview\"\n";
+        durable_fs::atomic_write(&paths.codex_config, external).unwrap();
+
+        let error = manager
+            .restore_backup(backup.id, &preview.live_revision)
+            .unwrap_err();
+
+        assert!(matches!(error, TransactionError::StaleBackupPreview { .. }));
+        assert_eq!(fs::read(&paths.codex_config).unwrap(), external);
+        assert_eq!(manager.list_backups().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn restoring_the_oldest_backup_keeps_it_when_the_limit_is_full() {
+        let (_temp, _paths, manager) = fixture();
+        for index in 0..MAX_BACKUPS {
+            manager
+                .apply(
+                    &activation(&format!("managed-model-{index}")),
+                    ConflictPolicy::Reject,
+                )
+                .unwrap();
+        }
+        let backups = manager.list_backups().unwrap();
+        let oldest = backups.last().unwrap().id;
+        let preview = manager.preview_backup(oldest).unwrap();
+
+        manager
+            .restore_backup(oldest, &preview.live_revision)
+            .unwrap();
+
+        let backups = manager.list_backups().unwrap();
+        assert_eq!(backups.len(), MAX_BACKUPS);
+        assert!(backups.iter().any(|backup| backup.id == oldest));
     }
 
     #[test]

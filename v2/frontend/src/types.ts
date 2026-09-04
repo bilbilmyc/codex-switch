@@ -31,6 +31,56 @@ export type Bootstrap = {
   startupMessage?: string;
 };
 
+export type BackupSnapshotSummary = {
+  id: string;
+  createdAtUnixMs: number;
+  configPresent: boolean;
+  authPresent: boolean;
+  statePresent: boolean;
+  catalogPresent: boolean;
+};
+
+export type BackupCenterView = {
+  backups: BackupSnapshotSummary[];
+};
+
+export type BackupRouteSnapshot = {
+  providerName?: string;
+  baseUrlConfigured: boolean;
+  model?: string;
+  reviewModel?: string;
+  contextSummary: string;
+  hasApiKey: boolean;
+};
+
+export type BackupManagedChange = "changed" | "unchanged" | "unknown";
+export type BackupApiKeyChange = "unchanged" | "added" | "removed" | "replaced" | "unknown";
+
+export type BackupPreview = {
+  backup: BackupSnapshotSummary;
+  liveRevision: string;
+  current?: BackupRouteSnapshot;
+  target: BackupRouteSnapshot;
+  managedChanges: {
+    provider: BackupManagedChange;
+    baseUrl: BackupManagedChange;
+    model: BackupManagedChange;
+    reviewModel: BackupManagedChange;
+    context: BackupManagedChange;
+    apiKey: BackupApiKeyChange;
+  };
+  fileChanges: {
+    config: boolean;
+    auth: boolean;
+    state: boolean;
+    catalog: boolean;
+  };
+  activeProfile?: {
+    id: string;
+    name: string;
+  };
+};
+
 export type ModelListView = {
   models: string[];
   cacheLabel: string;
