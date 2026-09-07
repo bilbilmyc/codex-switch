@@ -1,8 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Codex Switch V2",
+  "productName": "Codex Switch",
+  "mainBinaryName": "codex-switch",
   "version": "0.2.0-alpha.1",
-  "identifier": "com.mayc.codex-switch.v2",
+  "identifier": "com.mayc.codex-switch",
   "build": {
     "beforeDevCommand": "pnpm --dir frontend dev -- --host 127.0.0.1",
     "beforeBuildCommand": "pnpm --dir frontend build",
@@ -13,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Codex Switch V2",
+        "title": "Codex Switch",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -27,7 +28,13 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "mayc",
     "targets": "all",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
     "icon": [
       "../../assets/app-icon.png",
       "../../assets/app-icon.icns",

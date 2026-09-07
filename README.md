@@ -2,7 +2,7 @@
 
 Codex Switch 是一个轻量的 Codex 中转站配置切换工具，支持 macOS 与 Windows。V2 使用 Rust、Tauri 和 React 构建，V1 保留 Slint 界面。它管理中转站、API key、模型、上下文配置和本地 Token 用量，不试图替代 Codex 的完整配置界面。
 
-**当前主线为 V2（`v2/`，Tauri + React）**，后续新功能和界面演进以 V2 为目标。根目录的 Slint V1 进入维护阶段，只修复 bug；下文涉及 V1 的命令和安装包均明确标注版本。
+**`main` 主分支为 V2（`v2/`，Tauri + React）**，后续新功能、界面演进和发布均以 V2 为目标。根目录的 Slint V1 保留为维护代码，不再随主线发布安装包。
 
 ## 快速开始
 
@@ -116,6 +116,10 @@ GPT 兼容配置采用 128,000 上下文、文本输入、low/medium/high 推理
 - macOS：`Codex Switch.app` 和 `.dmg`。
 - Windows：NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
 
+V2 沿用 V1 的应用名 `Codex Switch`、应用标识 `com.mayc.codex-switch` 和可执行文件名 `codex-switch`。Windows 安装器会识别 V1，默认使用原安装目录进行升级，不再作为独立的 `Codex Switch V2` 安装；macOS 将新版 `Codex Switch.app` 拖入原“应用程序”目录并确认替换即可。升级前退出旧版应用。两版共享 `~/.codex-switch` 和 `~/.codex`，升级不清理这些目录，中转站、密钥和备份继续使用。
+
+早期独立安装的 `Codex Switch V2` alpha 包使用不同的安装身份，不在 V1 覆盖升级链中；已安装该测试包的用户应退出它并卸载程序本体，保留上述共享配置目录，再安装主线包。
+
 macOS 发布包在最终写入资源后使用临时签名校验其完整性，但没有 Apple Developer ID 证书。Gatekeeper 或 Windows SmartScreen 仍可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 不要求接受单独的安装条款；将 `Codex Switch.app` 拖到“应用程序”后，弹出安装磁盘，再从“应用程序”启动即可。
 
 面向组织外部发布 macOS 安装包时，应使用 Apple Developer ID 签名并向 Apple 公证 DMG。当前公开 Release 没有配置这类凭据，适合已确认来源的内部使用，不应宣称为已公证发行版。
@@ -128,7 +132,7 @@ macOS 发布包在最终写入资源后使用临时签名校验其完整性，�
 - V1（根目录 Slint 应用）只做 bug 修复，不增加新功能或进行界面重构。
 - 修复问题时必须检查 V2（`v2/` 下的 Tauri + React 应用）是否同样受影响；共有问题需要同时修复并验证两版。
 - 共有逻辑优先在共享后端修复，同时检查两版界面的调用和错误提示，不能仅凭共享依赖就认定 V2 已验证。
-- V1 与 V2 分别构建、打包和安装；交付时明确版本，不能把 V1 修复包称为 V2 安装包。
+- V2 在 `main` 开发和发布，并沿用 V1 的安装身份进行覆盖升级；不要更改产品名、发布者、应用标识、可执行文件名或 Windows 安装范围，否则会中断升级链。
 
 需要 Rust 1.92 或更高版本，以及当前平台的 Rust 原生构建工具链。V2 还需要 Node.js、pnpm 和 Tauri 2 CLI。
 
@@ -159,9 +163,11 @@ cd v2/src-tauri
 cargo tauri build
 ```
 
-Windows 仅生成 NSIS 安装器时使用 `cargo tauri build --bundles nsis`，产物位于 `v2/src-tauri/target/release/bundle/nsis/`，应用名为 **Codex Switch V2**。Tauri 的前端钩子以 `v2/` 为工作目录，因此使用 `pnpm --dir frontend`。V1 和 V2 可以分别安装，但共享配置及生命周期锁，不能同时运行。
+Windows 仅生成 NSIS 安装器时使用 `cargo tauri build --bundles nsis`，产物位于 `v2/src-tauri/target/release/bundle/nsis/`；macOS 使用 `cargo tauri build --bundles dmg`。应用名统一为 **Codex Switch**，V2 安装包用于升级 V1。Tauri 的前端钩子以 `v2/` 为工作目录，因此使用 `pnpm --dir frontend`。开发时两版仍共享配置及生命周期锁，不能同时运行。
 
-### V1 维护版
+### V1 历史维护构建
+
+仅用于维护验证，不上传到主线 Release；安装旧包会替换当前 V2，不应将其作为主线升级包分发。
 
 打包使用 `cargo-packager` 0.11.8：
 
@@ -172,7 +178,7 @@ cargo packager --release
 
 原生安装包应在对应目标系统上构建，默认输出到 `target/release/`。配置中的 `formats = ["default"]` 在 macOS 上生成 `.app` 与 `.dmg`，在 Windows 上生成 NSIS 安装器。Windows 安装器使用 `currentUser` 模式。macOS 打包后还需要运行 `scripts/normalize_macos_dmg.sh target/release/*.dmg`，以清除安装盘的应用图标，避免 Finder 在卷图标上叠加状态标识。
 
-GitHub Actions 在 macOS 和 Windows 上执行格式检查、Clippy、测试和原生打包，并分别上传 `.dmg` 与 `.exe` 构件。手动运行工作流或推送 tag 时，也会保留对应平台的安装包供下载。
+GitHub Actions 在 `main` 执行共享后端和 V2 检查。手动运行工作流会构建 V2 `.dmg` 与 NSIS `.exe` 并保留构件；推送与 `v2/src-tauri/Cargo.toml` 版本一致的 `v<version>` tag 时，将这些 V2 安装包上传至 Release，不再发布 V1 安装包。V2 的 Cargo、Tauri 和前端版本必须一致，根目录 Cargo 版本仅属于共享库及 V1。
 
 ## 许可
 

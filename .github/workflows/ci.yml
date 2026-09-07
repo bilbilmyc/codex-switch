@@ -17,11 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Require the tag to match Cargo package version
+      - name: Require the tag to match the V2 package version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
-          package_version="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "codex-switch") | .version')"
+          package_version="$(cargo metadata --manifest-path v2/src-tauri/Cargo.toml --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "codex-switch-v2") | .version')"
           test "$GITHUB_REF_NAME" = "v$package_version"
       - name: Require V2 package versions to agree
         shell: bash
@@ -98,47 +98,15 @@ jobs:
         with:
           generate_release_notes: true
 
-  package:
-    name: Package (${{ matrix.name }})
-    needs: [check, validate-release-version, create-release]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS
-            os: macos-latest
-            artifact: macos
-            package_glob: target/release/*.dmg
-          - name: Windows
-            os: windows-latest
-            artifact: windows
-            package_glob: target/release/*-setup.exe
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-packager
-        run: cargo install cargo-packager --version 0.11.8 --locked
-      - name: Build native installer
-        run: cargo packager --release
-      - name: Normalize macOS disk image
-        if: matrix.name == 'macOS'
-        shell: bash
-        run: scripts/normalize_macos_dmg.sh target/release/*.dmg
-      - name: Upload installer to the release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: ${{ matrix.package_glob }}
-          fail_on_unmatched_files: true
-
   package-v2:
     name: Package V2 (${{ matrix.name }})
     needs: [check, frontend, validate-release-version, create-release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      always() &&
+      needs.check.result == 'success' &&
+      needs.frontend.result == 'success' &&
+      needs.validate-release-version.result == 'success' &&
+      (needs.create-release.result == 'success' || github.event_name == 'workflow_dispatch')
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -148,9 +116,11 @@ jobs:
         include:
           - name: macOS
             os: macos-latest
+            bundle: dmg
             package_glob: v2/src-tauri/target/release/bundle/dmg/*.dmg
           - name: Windows
             os: windows-latest
+            bundle: nsis
             package_glob: v2/src-tauri/target/release/bundle/nsis/*-setup.exe
     steps:
       - uses: actions/checkout@v4
@@ -171,8 +141,15 @@ jobs:
         run: cargo install tauri-cli --version "^2" --locked
       - name: Build V2 native installer
         working-directory: v2/src-tauri
-        run: cargo tauri build
+        run: cargo tauri build --bundles ${{ matrix.bundle }}
+      - name: Upload V2 installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-switch-${{ matrix.name }}
+          path: ${{ matrix.package_glob }}
+          if-no-files-found: error
       - name: Upload V2 installer to the release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.package_glob }}
