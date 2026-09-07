@@ -10,6 +10,8 @@ import type {
   ModelListView,
   ProfileDraft,
   ProfileSummary,
+  RouteAuditHistoryView,
+  RouteAuditSaveRequest,
   UsageView,
 } from "./types";
 
@@ -107,6 +109,31 @@ const previewBackupPreviews: Record<string, BackupPreview> = {
     },
     fileChanges: { config: true, auth: true, state: true, catalog: true },
   },
+};
+
+let previewRouteAuditHistory: RouteAuditHistoryView = {
+  staleAfterMs: 86_400_000,
+  results: [
+    {
+      profileId: "preview-relay",
+      result: "success",
+      modelCount: 4,
+      modelCheckDurationMs: 36,
+      checkedAtUnixMs: new Date(2026, 8, 4, 18, 30).getTime(),
+      stale: false,
+      staleReasons: [],
+    },
+    {
+      profileId: "preview-removed-relay",
+      result: "error",
+      modelCheckDurationMs: 92,
+      checkedAtUnixMs: new Date(2026, 8, 2, 20, 15).getTime(),
+      errorCategory: "model_request_failed",
+      errorMessage: "网络连接失败",
+      stale: true,
+      staleReasons: ["expired", "profile_missing"],
+    },
+  ],
 };
 
 function toSummary(id: string, draft: ProfileDraft, isActive = false): ProfileSummary {
@@ -216,6 +243,22 @@ export const api = {
     if (!profile.hasApiKey) return { status: "failed", requestDurationMs: 41, checkedAtUnixMs: Date.now(), errorCategory: "missing_api_key" };
     if (!profile.baseUrl) return { status: "failed", requestDurationMs: 38, checkedAtUnixMs: Date.now(), errorCategory: "invalid_base_url" };
     return { status: "success", requestDurationMs: 684, checkedAtUnixMs: Date.now(), usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 } };
+  },
+  async loadRouteAuditResults(): Promise<RouteAuditHistoryView> {
+    if (isTauri) return invoke<RouteAuditHistoryView>("load_route_audit_results");
+    return previewRouteAuditHistory;
+  },
+  async saveRouteAuditResults(request: RouteAuditSaveRequest): Promise<RouteAuditHistoryView> {
+    if (isTauri) return invoke<RouteAuditHistoryView>("save_route_audit_results", { results: request.results });
+    previewRouteAuditHistory = {
+      staleAfterMs: previewRouteAuditHistory.staleAfterMs,
+      results: request.results.map((result) => ({ ...result, stale: false, staleReasons: [] })),
+    };
+    return previewRouteAuditHistory;
+  },
+  async clearRouteAuditResults(): Promise<void> {
+    if (isTauri) return invoke<void>("clear_route_audit_results");
+    previewRouteAuditHistory = { ...previewRouteAuditHistory, results: [] };
   },
   async loadBackupCenter(): Promise<BackupCenterView> {
     if (isTauri) return invoke<BackupCenterView>("load_backup_center");

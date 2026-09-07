@@ -26,6 +26,13 @@ pub struct ExclusiveLock {
     _file: File,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum BoundedRead {
+    Missing,
+    Contents(Vec<u8>),
+    TooLarge,
+}
+
 pub fn ensure_private_dir(path: &Path) -> Result<(), DurableFsError> {
     fs::create_dir_all(path).map_err(|source| io_error(path, source))?;
     set_private_dir_permissions(path)?;
@@ -78,6 +85,26 @@ pub fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, DurableFsError> {
         Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(source) => Err(io_error(path, source)),
     }
+}
+
+pub fn read_optional_bounded(path: &Path, max_bytes: u64) -> Result<BoundedRead, DurableFsError> {
+    reject_unsafe_target(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(BoundedRead::Missing),
+        Err(source) => return Err(io_error(path, source)),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(DurableFsError::UnsafeTarget(path.to_path_buf()));
+    }
+    if metadata.len() > max_bytes {
+        return Ok(BoundedRead::TooLarge);
+    }
+    let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    if bytes.len() as u64 > max_bytes {
+        return Ok(BoundedRead::TooLarge);
+    }
+    Ok(BoundedRead::Contents(bytes))
 }
 
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), DurableFsError> {

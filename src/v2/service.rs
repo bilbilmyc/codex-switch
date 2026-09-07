@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,6 +23,10 @@ use crate::paths::AppPaths;
 use crate::process;
 use crate::profiles::{ProfileStore, ProfilesDocument};
 use crate::responses_probe::{self, ProbeErrorCategory, ProbeOutcome, ProbeUsage};
+use crate::route_audit_store::{
+    self, RouteAuditErrorCategory, RouteAuditLoad, RouteAuditRecord, RouteAuditResultKind,
+    RouteAuditStore, RouteAuditStoreError,
+};
 use crate::transaction::{
     BackupApiKeyChange as TransactionBackupApiKeyChange, BackupChange as TransactionBackupChange,
     BackupPreview as TransactionBackupPreview, BackupProjection as TransactionBackupProjection,
@@ -31,6 +35,10 @@ use crate::transaction::{
 };
 use crate::usage::{LegacyUsageWindow, UsagePeriod, UsageScope};
 use crate::usage_store::UsageStore;
+
+const ROUTE_AUDIT_MAX_FUTURE_SKEW_MS: u64 = 5 * 60 * 1_000;
+const ROUTE_AUDIT_MAX_MODEL_COUNT: u32 = 2_000;
+const ROUTE_AUDIT_MAX_DURATION_MS: u64 = 60_000;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +115,7 @@ pub struct BackupProjectionView {
     pub has_api_key: bool,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupChangeView {
     Unchanged,
@@ -115,7 +123,7 @@ pub enum BackupChangeView {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupApiKeyChangeView {
     Unchanged,
@@ -216,6 +224,53 @@ pub struct DeepValidationView {
     pub error_category: Option<DeepValidationErrorCategory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<DeepValidationUsageView>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAuditResultDraft {
+    pub profile_id: String,
+    pub result: RouteAuditResultKind,
+    pub model_count: Option<u32>,
+    pub model_check_duration_ms: Option<u64>,
+    pub checked_at_unix_ms: u64,
+    pub error_category: Option<RouteAuditErrorCategory>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteAuditStaleReason {
+    ProfileChanged,
+    Expired,
+    ProfileMissing,
+    Unverifiable,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAuditStoredResultView {
+    pub profile_id: String,
+    pub result: RouteAuditResultKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_check_duration_ms: Option<u64>,
+    pub checked_at_unix_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<RouteAuditErrorCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    pub stale: bool,
+    pub stale_reasons: Vec<RouteAuditStaleReason>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteAuditHistoryView {
+    pub stale_after_ms: u64,
+    pub results: Vec<RouteAuditStoredResultView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -679,9 +734,15 @@ impl AppService {
         Ok(ModelListView {
             models: models_with_current(&cache.models, &fetched_from.model),
             cache_label: if cache_owned {
-                format!("刚刚获取了 {} 个模型", cache.models.len())
+                format!(
+                    "已获取 {} 个模型 ID；应用时注册目录，调用能力需深度验证",
+                    cache.models.len()
+                )
             } else {
-                format!("已获取 {} 个模型；保存连接后可缓存", cache.models.len())
+                format!(
+                    "已获取 {} 个模型 ID；保存后可缓存，调用能力尚未验证",
+                    cache.models.len()
+                )
             },
         })
     }
@@ -698,6 +759,68 @@ impl AppService {
             .get(profile_id)
             .ok_or_else(|| ServiceError::not_found(profile_id))?;
         Ok(DeepValidationView::from(responses_probe::probe(profile)))
+    }
+
+    pub fn load_route_audit_results(&self) -> Result<RouteAuditHistoryView, ServiceError> {
+        let _operation = self.operation_guard()?;
+        self.migrate_legacy_profiles_if_needed()?;
+        let document = self.store().load().map_err(ServiceError::profiles)?;
+        let store = self.route_audit_store();
+        let loaded = store.load().map_err(ServiceError::route_audit)?;
+        self.route_audit_history_view(&store, &document, loaded)
+    }
+
+    pub fn save_route_audit_results(
+        &self,
+        results: Vec<RouteAuditResultDraft>,
+    ) -> Result<RouteAuditHistoryView, ServiceError> {
+        let _operation = self.operation_guard()?;
+        self.migrate_legacy_profiles_if_needed()?;
+        validate_route_audit_drafts(&results, current_unix_time_ms())?;
+        let document = self.store().load().map_err(ServiceError::profiles)?;
+        let store = self.route_audit_store();
+        if matches!(
+            store.load().map_err(ServiceError::route_audit)?,
+            RouteAuditLoad::FutureSchema
+        ) {
+            return Err(ServiceError::route_audit_future_schema());
+        }
+        let revision_key = store
+            .ensure_revision_key()
+            .map_err(ServiceError::route_audit)?;
+        let mut records = Vec::with_capacity(results.len());
+        for draft in results {
+            let profile_id = parse_profile_id(&draft.profile_id)?;
+            let Some(profile) = document.get(profile_id) else {
+                continue;
+            };
+            records.push(RouteAuditRecord {
+                profile_id,
+                profile_revision: route_audit_store::profile_revision(&revision_key, profile)
+                    .map_err(ServiceError::route_audit)?,
+                result: draft.result,
+                model_count: draft.model_count,
+                model_check_duration_ms: draft.model_check_duration_ms,
+                checked_at_unix_ms: draft.checked_at_unix_ms,
+                error_category: draft.error_category,
+            });
+        }
+        match store.save(records, &revision_key) {
+            Err(RouteAuditStoreError::FutureSchema) => {
+                return Err(ServiceError::route_audit_future_schema());
+            }
+            Err(error) => return Err(ServiceError::route_audit(error)),
+            Ok(()) => {}
+        }
+        let loaded = store.load().map_err(ServiceError::route_audit)?;
+        self.route_audit_history_view(&store, &document, loaded)
+    }
+
+    pub fn clear_route_audit_results(&self) -> Result<(), ServiceError> {
+        let _operation = self.operation_guard()?;
+        self.route_audit_store()
+            .clear()
+            .map_err(ServiceError::route_audit)
     }
 
     pub fn load_backup_center(&self) -> Result<BackupCenterView, ServiceError> {
@@ -1068,6 +1191,98 @@ impl AppService {
         ProfileStore::new(self.paths.profiles.clone())
     }
 
+    fn route_audit_store(&self) -> RouteAuditStore {
+        RouteAuditStore::new(
+            self.paths.route_audit_results.clone(),
+            self.paths.route_audit_revision_key.clone(),
+        )
+    }
+
+    fn route_audit_history_view(
+        &self,
+        store: &RouteAuditStore,
+        profiles: &ProfilesDocument,
+        loaded: RouteAuditLoad,
+    ) -> Result<RouteAuditHistoryView, ServiceError> {
+        let (snapshot, warning) = match loaded {
+            RouteAuditLoad::Missing => {
+                return Ok(RouteAuditHistoryView {
+                    stale_after_ms: route_audit_store::STALE_AFTER_MS,
+                    results: Vec::new(),
+                    warning: None,
+                });
+            }
+            RouteAuditLoad::Corrupt => {
+                return Ok(RouteAuditHistoryView {
+                    stale_after_ms: route_audit_store::STALE_AFTER_MS,
+                    results: Vec::new(),
+                    warning: Some("巡检历史损坏或超过安全上限，已忽略".to_owned()),
+                });
+            }
+            RouteAuditLoad::FutureSchema => {
+                return Ok(RouteAuditHistoryView {
+                    stale_after_ms: route_audit_store::STALE_AFTER_MS,
+                    results: Vec::new(),
+                    warning: Some("巡检历史由较新版本创建，当前版本未加载且不会覆盖".to_owned()),
+                });
+            }
+            RouteAuditLoad::Ready(snapshot) => (snapshot, None),
+        };
+        let revision_key = store
+            .load_revision_key()
+            .map_err(ServiceError::route_audit)?;
+        let revision_key_matches = revision_key
+            .as_ref()
+            .is_some_and(|key| route_audit_store::revision_key_id(key) == snapshot.revision_key_id);
+        let now = current_unix_time_ms();
+        let results = snapshot
+            .results
+            .into_iter()
+            .map(|record| {
+                let mut stale_reasons = Vec::new();
+                match profiles.get(record.profile_id) {
+                    None => stale_reasons.push(RouteAuditStaleReason::ProfileMissing),
+                    Some(_) if !revision_key_matches => {
+                        stale_reasons.push(RouteAuditStaleReason::Unverifiable);
+                    }
+                    Some(profile) => {
+                        let current_revision = revision_key
+                            .as_ref()
+                            .and_then(|key| route_audit_store::profile_revision(key, profile).ok());
+                        match current_revision {
+                            Some(revision) if revision != record.profile_revision => {
+                                stale_reasons.push(RouteAuditStaleReason::ProfileChanged);
+                            }
+                            Some(_) => {}
+                            None => stale_reasons.push(RouteAuditStaleReason::Unverifiable),
+                        }
+                    }
+                }
+                if now.saturating_sub(record.checked_at_unix_ms)
+                    >= route_audit_store::STALE_AFTER_MS
+                {
+                    stale_reasons.push(RouteAuditStaleReason::Expired);
+                }
+                RouteAuditStoredResultView {
+                    profile_id: record.profile_id.to_string(),
+                    result: record.result,
+                    model_count: record.model_count,
+                    model_check_duration_ms: record.model_check_duration_ms,
+                    checked_at_unix_ms: record.checked_at_unix_ms,
+                    error_category: record.error_category,
+                    error_message: record.error_category.map(route_audit_error_message),
+                    stale: !stale_reasons.is_empty(),
+                    stale_reasons,
+                }
+            })
+            .collect();
+        Ok(RouteAuditHistoryView {
+            stale_after_ms: route_audit_store::STALE_AFTER_MS,
+            results,
+            warning,
+        })
+    }
+
     fn profile_summary(&self, profile: &Profile, document: &ProfilesDocument) -> ProfileSummary {
         let active_profile_id = self.active_profile_id(document);
         let (live_profile, baseline_matches) = self.live_apply_context();
@@ -1185,10 +1400,16 @@ impl AppService {
                     .then(|| process::relaunch_desktop(desktop_executable.as_deref()).err())
                     .flatten()
                     .map(|error| format!("切换完成，但 Codex Desktop 未能重新打开：{error}"));
-                let warning = relaunch_warning.or_else(|| {
+                let warnings: Vec<String> = [
+                    relaunch_warning,
                     validation_skipped
-                        .then_some("切换完成；未找到 Codex 校验器，仅完成结构校验".to_owned())
-                });
+                        .then_some("切换完成；未找到 Codex 校验器，仅完成结构校验".to_owned()),
+                    outcome.catalog_warning,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                let warning = (!warnings.is_empty()).then(|| warnings.join("；"));
                 Ok(ApplyResponse::Applied {
                     active_profile_id: outcome
                         .state
@@ -1899,6 +2120,74 @@ fn parse_profile_id(value: &str) -> Result<ProfileId, ServiceError> {
         .map_err(|_| ServiceError::invalid_profile_id())
 }
 
+fn current_unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn validate_route_audit_drafts(
+    results: &[RouteAuditResultDraft],
+    now_unix_ms: u64,
+) -> Result<(), ServiceError> {
+    let mut profile_ids = HashSet::with_capacity(results.len());
+    for draft in results {
+        let profile_id = parse_profile_id(&draft.profile_id)?;
+        if !profile_ids.insert(profile_id) {
+            return Err(ServiceError::route_audit("duplicate profile"));
+        }
+        if draft.checked_at_unix_ms == 0
+            || draft.checked_at_unix_ms > now_unix_ms.saturating_add(ROUTE_AUDIT_MAX_FUTURE_SKEW_MS)
+            || draft
+                .model_count
+                .is_some_and(|count| count == 0 || count > ROUTE_AUDIT_MAX_MODEL_COUNT)
+            || draft
+                .model_check_duration_ms
+                .is_some_and(|duration| duration > ROUTE_AUDIT_MAX_DURATION_MS)
+        {
+            return Err(ServiceError::route_audit("invalid result bounds"));
+        }
+        let valid_shape = match draft.result {
+            RouteAuditResultKind::Success => {
+                draft.model_count.is_some()
+                    && draft.model_check_duration_ms.is_some()
+                    && draft.error_category.is_none()
+            }
+            RouteAuditResultKind::Error => {
+                draft.model_count.is_none() && draft.error_category.is_some()
+            }
+            RouteAuditResultKind::Incomplete => {
+                draft.model_count.is_none()
+                    && draft.model_check_duration_ms.is_none()
+                    && draft.error_category.is_some()
+            }
+            RouteAuditResultKind::Stopped => {
+                draft.model_count.is_none()
+                    && draft.model_check_duration_ms.is_none()
+                    && draft.error_category.is_none()
+            }
+        };
+        if !valid_shape {
+            return Err(ServiceError::route_audit("invalid result shape"));
+        }
+    }
+    Ok(())
+}
+
+fn route_audit_error_message(category: RouteAuditErrorCategory) -> String {
+    match category {
+        RouteAuditErrorCategory::ModelRequestFailed => "模型目录检查失败".to_owned(),
+        RouteAuditErrorCategory::MissingBaseUrl => "缺少中转站地址".to_owned(),
+        RouteAuditErrorCategory::MissingApiKey => "缺少 API Key".to_owned(),
+        RouteAuditErrorCategory::MissingModel => "缺少默认模型".to_owned(),
+        RouteAuditErrorCategory::MissingMultipleFields => "中转站配置不完整".to_owned(),
+        RouteAuditErrorCategory::Unknown => "巡检未完成".to_owned(),
+    }
+}
+
 fn parse_backup_id(value: &str) -> Result<crate::transaction::BackupId, ServiceError> {
     value.parse().map_err(|_| ServiceError::invalid_backup_id())
 }
@@ -2345,6 +2634,10 @@ pub enum ServiceError {
     Usage(String),
     #[error("模型列表无法读取或刷新")]
     Models,
+    #[error("巡检历史无法读取或保存")]
+    RouteAudit,
+    #[error("巡检历史由较新版本创建，当前版本不会覆盖")]
+    RouteAuditFutureSchema,
 }
 
 impl ServiceError {
@@ -2431,6 +2724,14 @@ impl ServiceError {
     fn models(_error: impl std::fmt::Display) -> Self {
         Self::Models
     }
+
+    fn route_audit(_error: impl std::fmt::Display) -> Self {
+        Self::RouteAudit
+    }
+
+    fn route_audit_future_schema() -> Self {
+        Self::RouteAuditFutureSchema
+    }
 }
 
 #[cfg(test)]
@@ -2451,6 +2752,17 @@ mod tests {
             clear_api_key: false,
             model: "gpt-5.2-codex".to_owned(),
             review_model: None,
+        }
+    }
+
+    fn route_audit_success(profile_id: &str, checked_at_unix_ms: u64) -> RouteAuditResultDraft {
+        RouteAuditResultDraft {
+            profile_id: profile_id.to_owned(),
+            result: RouteAuditResultKind::Success,
+            model_count: Some(3),
+            model_check_duration_ms: Some(25),
+            checked_at_unix_ms,
+            error_category: None,
         }
     }
 
@@ -3085,6 +3397,188 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn route_audit_results_round_trip_without_secrets_and_detect_profile_changes() {
+        let (_home, service) = service();
+        let mut saved = draft("Relay Audit");
+        saved.base_url = "https://secret-audit-route.example/v1".to_owned();
+        saved.api_key = Some("sk-secret-audit-key".to_owned());
+        saved.model = "secret-audit-model".to_owned();
+        let created = service.create_profile(saved).unwrap();
+        let now = current_unix_time_ms();
+        let missing_profile_id = ProfileId::new().to_string();
+
+        let history = service
+            .save_route_audit_results(vec![
+                route_audit_success(&created.id, now),
+                RouteAuditResultDraft {
+                    profile_id: missing_profile_id,
+                    result: RouteAuditResultKind::Stopped,
+                    model_count: None,
+                    model_check_duration_ms: None,
+                    checked_at_unix_ms: now,
+                    error_category: None,
+                },
+            ])
+            .unwrap();
+
+        assert_eq!(history.stale_after_ms, route_audit_store::STALE_AFTER_MS);
+        assert_eq!(history.results.len(), 1);
+        assert!(!history.results[0].stale);
+        let serialized = serde_json::to_string(&history).unwrap();
+        let raw = fs::read_to_string(&service.paths.route_audit_results).unwrap();
+        for secret in [
+            "secret-audit-route",
+            "sk-secret-audit-key",
+            "secret-audit-model",
+        ] {
+            assert!(!serialized.contains(secret));
+            assert!(!raw.contains(secret));
+        }
+        assert!(!serialized.contains("profileRevision"));
+        assert!(!serialized.contains("revisionKeyId"));
+
+        let mut renamed = ProfileDraft {
+            name: "Relay Audit Renamed".to_owned(),
+            base_url: "https://secret-audit-route.example/v1".to_owned(),
+            api_key: None,
+            clear_api_key: false,
+            model: "secret-audit-model".to_owned(),
+            review_model: None,
+        };
+        service
+            .update_profile(created.id.clone(), renamed.clone())
+            .unwrap();
+        assert!(!service.load_route_audit_results().unwrap().results[0].stale);
+
+        renamed.model = "changed-model".to_owned();
+        service.update_profile(created.id, renamed).unwrap();
+        let changed = service.load_route_audit_results().unwrap();
+        assert!(changed.results[0].stale);
+        assert!(matches!(
+            changed.results[0].stale_reasons.as_slice(),
+            [RouteAuditStaleReason::ProfileChanged]
+        ));
+    }
+
+    #[test]
+    fn route_audit_results_mark_expired_unverifiable_and_missing_profiles() {
+        let (_home, service) = service();
+        let first = service.create_profile(draft("Relay A")).unwrap();
+        let second = service.create_profile(draft("Relay B")).unwrap();
+        let now = current_unix_time_ms();
+        let expired_at = now.saturating_sub(route_audit_store::STALE_AFTER_MS + 1);
+        service
+            .save_route_audit_results(vec![
+                route_audit_success(&first.id, now),
+                RouteAuditResultDraft {
+                    profile_id: second.id.clone(),
+                    result: RouteAuditResultKind::Incomplete,
+                    model_count: None,
+                    model_check_duration_ms: None,
+                    checked_at_unix_ms: expired_at,
+                    error_category: Some(RouteAuditErrorCategory::MissingApiKey),
+                },
+            ])
+            .unwrap();
+        fs::remove_file(&service.paths.route_audit_revision_key).unwrap();
+
+        let unverifiable = service.load_route_audit_results().unwrap();
+        assert!(
+            unverifiable.results[0]
+                .stale_reasons
+                .contains(&RouteAuditStaleReason::Unverifiable)
+        );
+        assert!(
+            unverifiable.results[1]
+                .stale_reasons
+                .contains(&RouteAuditStaleReason::Unverifiable)
+        );
+        assert!(
+            unverifiable.results[1]
+                .stale_reasons
+                .contains(&RouteAuditStaleReason::Expired)
+        );
+        assert_eq!(
+            unverifiable.results[1].error_message.as_deref(),
+            Some("缺少 API Key")
+        );
+
+        service.delete_profile(first.id).unwrap();
+        let missing = service.load_route_audit_results().unwrap();
+        assert!(
+            missing.results[0]
+                .stale_reasons
+                .contains(&RouteAuditStaleReason::ProfileMissing)
+        );
+    }
+
+    #[test]
+    fn route_audit_validation_and_future_schema_protection_are_tolerant_and_safe() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let now = current_unix_time_ms();
+        let valid = route_audit_success(&created.id, now);
+
+        assert!(matches!(
+            service.save_route_audit_results(vec![valid.clone(), valid.clone()]),
+            Err(ServiceError::RouteAudit)
+        ));
+        let mut invalid = valid.clone();
+        invalid.model_count = None;
+        assert!(matches!(
+            service.save_route_audit_results(vec![invalid]),
+            Err(ServiceError::RouteAudit)
+        ));
+        let mut future = valid.clone();
+        future.checked_at_unix_ms = now + ROUTE_AUDIT_MAX_FUTURE_SKEW_MS + 1;
+        assert!(matches!(
+            service.save_route_audit_results(vec![future]),
+            Err(ServiceError::RouteAudit)
+        ));
+        let mut unreasonable = valid.clone();
+        unreasonable.model_count = Some(ROUTE_AUDIT_MAX_MODEL_COUNT + 1);
+        assert!(matches!(
+            service.save_route_audit_results(vec![unreasonable]),
+            Err(ServiceError::RouteAudit)
+        ));
+
+        durable_fs::atomic_write(
+            &service.paths.route_audit_results,
+            br#"{"schema_version":99,"results":[]}"#,
+        )
+        .unwrap();
+        let future_bytes = fs::read(&service.paths.route_audit_results).unwrap();
+        let future = service.load_route_audit_results().unwrap();
+        assert!(future.results.is_empty());
+        assert!(future.warning.is_some());
+        assert!(matches!(
+            service.save_route_audit_results(vec![valid.clone()]),
+            Err(ServiceError::RouteAuditFutureSchema)
+        ));
+        assert_eq!(
+            fs::read(&service.paths.route_audit_results).unwrap(),
+            future_bytes
+        );
+
+        durable_fs::atomic_write(&service.paths.route_audit_results, b"truncated {").unwrap();
+        let corrupt = service.load_route_audit_results().unwrap();
+        assert!(corrupt.results.is_empty());
+        assert!(corrupt.warning.is_some());
+        service.save_route_audit_results(vec![valid]).unwrap();
+        assert_eq!(service.load_route_audit_results().unwrap().results.len(), 1);
+
+        service.clear_route_audit_results().unwrap();
+        assert!(
+            service
+                .load_route_audit_results()
+                .unwrap()
+                .results
+                .is_empty()
+        );
+        assert!(!service.paths.route_audit_results.exists());
+    }
+
+    #[test]
     fn cached_models_keep_a_manually_entered_current_model_selectable() {
         assert_eq!(
             models_with_current(&["glm-5.3".to_owned()], "custom-relay-model"),
@@ -3114,5 +3608,36 @@ requires_openai_auth = true
             serde_json::from_slice(&fs::read(&service.paths.managed_model_catalog).unwrap())
                 .unwrap();
         assert_eq!(catalog["models"][0]["slug"], "glm-5.3");
+    }
+
+    #[test]
+    fn v2_apply_registers_unknown_gpt_and_returns_the_compatibility_warning() {
+        let (_home, service) = service();
+        let mut profile = draft("Future GPT Relay");
+        profile.model = "gpt-99-test".to_owned();
+        let created = service.create_profile(profile).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        let activation = document.get(profile_id).unwrap().activation().unwrap();
+
+        let response = service
+            .apply_activation(activation, ConflictPolicy::Reject, false, None)
+            .unwrap();
+        let ApplyResponse::Applied {
+            active_profile_id,
+            warning,
+        } = response
+        else {
+            panic!("expected the V2 apply flow to complete");
+        };
+        assert_eq!(active_profile_id, created.id);
+        assert!(warning.unwrap().contains("兼容模式"));
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&service.paths.managed_model_catalog).unwrap())
+                .unwrap();
+        assert_eq!(catalog["models"][0]["slug"], "gpt-99-test");
+        assert_eq!(catalog["models"][0]["visibility"], "list");
+        let config = fs::read_to_string(&service.paths.codex_config).unwrap();
+        assert!(config.contains("model-catalogs/codex-switch-models.json"));
     }
 }

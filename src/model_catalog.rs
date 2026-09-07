@@ -2,23 +2,39 @@ use serde_json::{Map, Value, json};
 
 pub const MANAGED_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codex-switch-models.json";
 
-/// Returns a merged Codex model catalog for the supported relay model families.
-///
-/// Model IDs returned by relay `/models` are not enough for Codex to determine context,
-/// reasoning, and tool capabilities. Keep this deliberately scoped to families that the
-/// application supports rather than guessing for every arbitrary relay model.
+const GPT_COMPATIBILITY_DESCRIPTION: &str =
+    "GPT relay compatibility profile (unverified conservative limits)";
+
+#[derive(Debug)]
+pub struct CatalogUpdate {
+    pub contents: Vec<u8>,
+    pub warning: Option<String>,
+}
+
+#[cfg(test)]
 pub fn merge_supported_model(
     existing: Option<&[u8]>,
     model: &str,
 ) -> Result<Option<Vec<u8>>, String> {
-    let Some(entry) = supported_entry(model) else {
-        return Ok(None);
-    };
+    merge_model_catalog(existing, None, model).map(|update| update.map(|value| value.contents))
+}
 
+pub fn merge_model_catalog(
+    existing: Option<&[u8]>,
+    cached: Option<&[u8]>,
+    model: &str,
+) -> Result<Option<CatalogUpdate>, String> {
+    let cached_root = cached.and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
     let mut root = match existing {
         Some(bytes) => serde_json::from_slice::<Value>(bytes)
             .map_err(|error| format!("managed model catalog is invalid JSON: {error}"))?,
-        None => json!({ "models": [] }),
+        None => json!({ "models": cached_root.as_ref()
+            .and_then(|root| root.get("models"))
+            .and_then(Value::as_array)
+            .map(|models| models.iter().filter(|candidate| {
+                candidate["slug"].as_str().is_some_and(|slug| usable_entry(candidate, slug))
+            }).cloned().collect::<Vec<_>>())
+            .unwrap_or_default() }),
     };
     let object = root
         .as_object_mut()
@@ -29,30 +45,119 @@ pub fn merge_supported_model(
         .as_array_mut()
         .ok_or_else(|| "managed model catalog models must be an array".to_owned())?;
 
-    let slug = entry["slug"]
-        .as_str()
-        .expect("supported catalog entries always contain a slug");
+    let slug = model.trim();
+    let existing_entry = models
+        .iter()
+        .find(|candidate| usable_entry(candidate, slug));
+    let cached_entry = cached_root
+        .as_ref()
+        .and_then(|root| root.get("models"))
+        .and_then(Value::as_array)
+        .and_then(|models| {
+            models
+                .iter()
+                .find(|candidate| usable_entry(candidate, slug))
+        });
+    let selected = existing_entry
+        .filter(|candidate| !is_compatibility_entry(candidate))
+        .or(cached_entry)
+        .or(existing_entry)
+        .cloned()
+        .or_else(|| supported_entry(slug));
+    let Some(mut selected) = selected else {
+        return Ok(None);
+    };
+    let warning = is_compatibility_entry(&selected).then(|| {
+        "模型已注册为兼容模式，能力与调用尚未验证；仅配置文本输入、128K 上下文和 low/medium/high 推理档位。请先深度验证，并重新启动 Codex。".to_owned()
+    });
+    selected["visibility"] = json!("list");
     if let Some(index) = models
         .iter()
         .position(|candidate| candidate.get("slug").and_then(Value::as_str) == Some(slug))
     {
-        models[index] = entry;
+        models[index] = selected;
     } else {
-        models.push(entry);
+        models.push(selected);
     }
 
     serde_json::to_vec_pretty(&root)
-        .map(Some)
+        .map(|contents| Some(CatalogUpdate { contents, warning }))
         .map_err(|error| format!("could not serialize managed model catalog: {error}"))
 }
 
-pub fn is_supported_model(model: &str) -> bool {
+#[cfg(test)]
+fn is_supported_model(model: &str) -> bool {
     supported_entry(model).is_some()
+}
+
+fn usable_entry(candidate: &Value, slug: &str) -> bool {
+    candidate["slug"].as_str() == Some(slug)
+        && candidate["supported_in_api"].as_bool() == Some(true)
+        && candidate["context_window"]
+            .as_u64()
+            .is_some_and(|size| size > 0)
+        && candidate["supported_reasoning_levels"].is_array()
+        && candidate["default_reasoning_level"].is_string()
+        && candidate["shell_type"].is_string()
+        && candidate["base_instructions"].is_string()
+        && candidate["input_modalities"]
+            .as_array()
+            .is_some_and(|modalities| {
+                modalities
+                    .iter()
+                    .any(|modality| modality.as_str() == Some("text"))
+            })
+}
+
+fn is_compatibility_entry(candidate: &Value) -> bool {
+    matches!(
+        candidate["description"].as_str(),
+        Some(
+            GPT_COMPATIBILITY_DESCRIPTION
+                | "GPT-6 Astra relay compatibility profile (conservative limits)"
+        )
+    )
+}
+
+fn is_gpt_text_model(model: &str) -> bool {
+    model
+        .strip_prefix("gpt-")
+        .and_then(|suffix| suffix.chars().next())
+        .is_some_and(|first| first.is_ascii_digit())
+        && !model.split(['-', '.']).any(|part| {
+            matches!(
+                part,
+                "image"
+                    | "audio"
+                    | "realtime"
+                    | "transcribe"
+                    | "tts"
+                    | "embedding"
+                    | "embeddings"
+                    | "moderation"
+                    | "video"
+                    | "search"
+            )
+        })
 }
 
 fn supported_entry(model: &str) -> Option<Value> {
     let normalized = model.trim();
     let lower = normalized.to_ascii_lowercase();
+    if is_gpt_text_model(&lower) {
+        return Some(entry(
+            normalized,
+            GPT_COMPATIBILITY_DESCRIPTION,
+            "medium",
+            json!([
+                { "effort": "low", "description": "Light reasoning" },
+                { "effort": "medium", "description": "Balanced reasoning" },
+                { "effort": "high", "description": "Enhanced reasoning" }
+            ]),
+            128_000,
+            90,
+        ));
+    }
     if lower.starts_with("glm-") {
         return Some(entry(
             normalized,
@@ -148,8 +253,153 @@ fn entry(
 mod tests {
     use super::*;
 
+    fn known_catalog(model: &str) -> Vec<u8> {
+        let mut known = supported_entry("glm-5.3").unwrap();
+        known["slug"] = json!(model);
+        known["display_name"] = json!(model);
+        known["base_instructions"] = json!("Preserve these instructions");
+        serde_json::to_vec(&json!({"models": [known]})).unwrap()
+    }
+
+    #[test]
+    fn exact_cached_metadata_registers_models_without_a_family_rule() {
+        let cache = known_catalog("future-agent-test");
+        let update = merge_model_catalog(None, Some(&cache), "future-agent-test")
+            .unwrap()
+            .unwrap();
+        assert!(update.warning.is_none());
+        let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
+        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+        assert_eq!(
+            parsed["models"][0]["base_instructions"],
+            "Preserve these instructions"
+        );
+    }
+
+    #[test]
+    fn cached_metadata_upgrades_compatibility_entries_without_duplicates() {
+        let first = merge_model_catalog(None, None, "gpt-99-test")
+            .unwrap()
+            .unwrap();
+        assert!(first.warning.is_some());
+        let cache = known_catalog("gpt-99-test");
+        let second = merge_model_catalog(Some(&first.contents), Some(&cache), "gpt-99-test")
+            .unwrap()
+            .unwrap();
+        assert!(second.warning.is_none());
+        let parsed: Value = serde_json::from_slice(&second.contents).unwrap();
+        assert_eq!(parsed["models"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+    }
+
+    #[test]
+    fn existing_metadata_takes_priority_over_the_cache() {
+        let existing = known_catalog("gpt-99-test");
+        let mut cache: Value = serde_json::from_slice(&existing).unwrap();
+        cache["models"][0]["context_window"] = json!(256_000);
+        let bytes = serde_json::to_vec(&cache).unwrap();
+        let update = merge_model_catalog(Some(&existing), Some(&bytes), "gpt-99-test")
+            .unwrap()
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
+        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+    }
+
+    #[test]
+    fn compatibility_retains_warning_on_repeated_apply() {
+        let first = merge_model_catalog(None, None, "gpt-99-test")
+            .unwrap()
+            .unwrap();
+        let second = merge_model_catalog(Some(&first.contents), None, "gpt-99-test")
+            .unwrap()
+            .unwrap();
+        assert!(second.warning.is_some());
+        assert_eq!(first.contents, second.contents);
+    }
+
+    #[test]
+    fn unknown_models_do_not_borrow_metadata_from_a_similar_slug() {
+        let cache = known_catalog("gpt-99-test");
+        let update = merge_model_catalog(None, Some(&cache), "gpt-99-test-mini")
+            .unwrap()
+            .unwrap();
+        assert!(update.warning.is_some());
+        let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
+        assert_eq!(parsed["models"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["models"][1]["context_window"], 128_000);
+    }
+
+    #[test]
+    fn malformed_optional_cache_does_not_block_but_malformed_catalog_does() {
+        assert!(
+            merge_model_catalog(None, Some(b"broken"), "gpt-99-test")
+                .unwrap()
+                .unwrap()
+                .warning
+                .is_some()
+        );
+        assert!(merge_model_catalog(Some(b"broken"), None, "gpt-99-test").is_err());
+    }
+
+    #[test]
+    fn model_ids_alone_are_not_capability_metadata() {
+        let cache = br#"{"models":[{"slug":"gpt-99-test"}]}"#;
+        assert!(
+            merge_model_catalog(None, Some(cache), "gpt-99-test")
+                .unwrap()
+                .unwrap()
+                .warning
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn non_agent_model_names_are_not_automatically_registered() {
+        for model in [
+            "gpt-image-99",
+            "gpt-99-test-image",
+            "gpt-99-test-audio-preview",
+            "gpt-99-test-realtime",
+            "gpt-99-test-transcribe",
+            "gpt-99-test-search",
+            "gpt-99-test-embedding",
+            "gpt-99-test-tts",
+            "gpt-99-test-video",
+            "unrecognized-model",
+        ] {
+            assert!(
+                merge_model_catalog(None, None, model).unwrap().is_none(),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn future_gpt_text_models_do_not_need_a_version_specific_branch() {
+        for model in ["gpt-99-test", "gpt-99.1-test-codex", "gpt-100-test-mini"] {
+            assert!(
+                merge_supported_model(None, model).unwrap().is_some(),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_capabilities_are_not_overwritten_by_a_builtin_profile() {
+        let mut known = supported_entry("glm-5.3").unwrap();
+        known["context_window"] = json!(256_000);
+        known["input_modalities"] = json!(["text", "image"]);
+        let existing = serde_json::to_vec(&json!({"models": [known.clone()]})).unwrap();
+        let merged = merge_supported_model(Some(&existing), "glm-5.3")
+            .unwrap()
+            .unwrap();
+        let parsed: Value = serde_json::from_slice(&merged).unwrap();
+        assert_eq!(parsed["models"][0], known);
+    }
+
     #[test]
     fn supports_only_the_intended_text_model_families() {
+        assert!(is_supported_model("gpt-6-astra"));
         assert!(is_supported_model("glm-5.3"));
         assert!(is_supported_model("deepseek-v4-flash"));
         assert!(is_supported_model("qwen3.8-max"));

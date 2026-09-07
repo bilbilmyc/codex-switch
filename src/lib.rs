@@ -13,6 +13,7 @@ pub mod paths;
 pub mod process;
 pub mod profiles;
 pub mod responses_probe;
+pub mod route_audit_store;
 pub mod transaction;
 pub mod usage;
 pub mod usage_store;

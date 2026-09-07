@@ -51,9 +51,12 @@ import {
 } from "./profile-console";
 import { RouteAuditDialog, type RouteAuditStatus } from "./RouteAuditDialog";
 import {
+  mergeRouteAuditConnection,
   runRouteAudit,
   profileConfigurationIssue,
-  summarizeRouteAudit,
+  routeAuditHistoryHasStale,
+  routeAuditHistoryToSession,
+  routeAuditSessionToSaveRequest,
   type ConnectionCheck,
   type RouteAuditEntry,
   type RouteAuditSession,
@@ -170,6 +173,33 @@ export default function App() {
     enabled: Boolean(selectedProfile),
     refetchInterval: 900_000,
   });
+  const routeAuditResults = useQuery({
+    queryKey: ["route-audit-results"],
+    queryFn: api.loadRouteAuditResults,
+    enabled: routeAuditOpen && !routeAuditBusy && !routeAuditSession,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+  const routeAuditHistorySession = useMemo(
+    () => routeAuditResults.data?.results.length
+      ? routeAuditHistoryToSession(routeAuditResults.data, profiles)
+      : undefined,
+    [profiles, routeAuditResults.data],
+  );
+  const displayedRouteAuditSession = routeAuditBusy
+    ? routeAuditSession
+    : routeAuditSession ?? routeAuditHistorySession;
+  const displayedRouteAuditStatus: RouteAuditStatus = routeAuditSession || routeAuditBusy
+    ? routeAuditStatus
+    : routeAuditResults.isFetching
+      ? "loading"
+      : routeAuditResults.error
+        ? "history_error"
+        : routeAuditResults.data?.warning
+          ? "history_warning"
+        : routeAuditHistorySession
+          ? routeAuditHistoryHasStale(routeAuditHistorySession) ? "stale" : "history"
+          : "idle";
 
   useEffect(() => {
     if (profiles.length > 0 && !profiles.some((profile) => profile.id === selectedId)) {
@@ -604,6 +634,16 @@ export default function App() {
     setRouteAuditOpen(true);
   }
 
+  async function persistRouteAuditSession(session: RouteAuditSession) {
+    try {
+      const saved = await api.saveRouteAuditResults(routeAuditSessionToSaveRequest(session));
+      queryClient.setQueryData(["route-audit-results"], saved);
+      return undefined;
+    } catch (error) {
+      return messageFor(error);
+    }
+  }
+
   async function startRouteAudit() {
     if (busy || profiles.length === 0 || !ensureWorkspaceSaved()) return;
     const runId = routeAuditRunId.current + 1;
@@ -640,12 +680,15 @@ export default function App() {
     if (routeAuditRunId.current !== runId) return;
     setRouteAuditSession(finished);
     const stopped = finished.summary.stopped > 0;
+    const persistenceError = await persistRouteAuditSession(finished);
+    if (routeAuditRunId.current !== runId) return;
     setRouteAuditStatus(stopped ? "stopped" : "complete");
+    const resultText = stopped
+      ? `巡检已停止，${finished.summary.success + finished.summary.error + finished.summary.incomplete}/${finished.summary.total} 已完成`
+      : `巡检完成：${finished.summary.success} 可用，${finished.summary.incomplete} 未配置，${finished.summary.error} 失败`;
     setNotice({
-      tone: finished.summary.error > 0 ? "warning" : "success",
-      text: stopped
-        ? `巡检已停止，${finished.summary.success + finished.summary.error + finished.summary.incomplete}/${finished.summary.total} 已完成`
-        : `巡检完成：${finished.summary.success} 可用，${finished.summary.incomplete} 未配置，${finished.summary.error} 失败`,
+      tone: persistenceError || finished.summary.error > 0 ? "warning" : "success",
+      text: persistenceError ? `${resultText}；结果未保存：${persistenceError}` : resultText,
     });
   }
 
@@ -657,23 +700,34 @@ export default function App() {
 
   async function retryRouteAuditProfile(profile: ProfileSummary) {
     if (busy || routeAuditBusy) return;
+    const auditSession = routeAuditSession ?? routeAuditHistorySession;
+    if (!auditSession) return;
     const runId = routeAuditRunId.current + 1;
     routeAuditRunId.current = runId;
-    const remainingStopped = routeAuditSession?.entries.some(
+    const remainingStopped = auditSession.entries.some(
       (entry) => entry.id !== profile.id && entry.state === "stopped",
-    ) ?? false;
+    );
     setRouteAuditStatus("retrying");
     const checking: ConnectionCheck = { state: "checking" };
     storeConnectionCheck(profile.id, checking);
-    mergeAuditConnection(profile.id, checking);
+    const checkingSession = mergeRouteAuditConnection(auditSession, profile, checking);
+    setRouteAuditSession(checkingSession);
 
     try {
       const connection = await probeProfileConnection(profile);
       if (routeAuditRunId.current !== runId) return;
       storeConnectionCheck(profile.id, connection);
-      mergeAuditConnection(profile.id, connection);
-      setRouteAuditStatus(remainingStopped ? "stopped" : "complete");
-      setNotice({ tone: "success", text: `${profile.name} 连接正常，${connection.latencyMs} ms` });
+      const finished = mergeRouteAuditConnection(checkingSession, profile, connection);
+      setRouteAuditSession(finished);
+      const persistenceError = await persistRouteAuditSession(finished);
+      if (routeAuditRunId.current !== runId) return;
+      setRouteAuditStatus(routeAuditHistoryHasStale(finished) ? "stale" : remainingStopped ? "stopped" : "complete");
+      setNotice({
+        tone: persistenceError ? "warning" : "success",
+        text: persistenceError
+          ? `${profile.name} 连接正常，${connection.latencyMs} ms；结果未保存：${persistenceError}`
+          : `${profile.name} 连接正常，${connection.latencyMs} ms`,
+      });
     } catch (error) {
       if (routeAuditRunId.current !== runId) return;
       const connection: ConnectionCheck = {
@@ -682,9 +736,17 @@ export default function App() {
         checkedAt: Date.now(),
       };
       storeConnectionCheck(profile.id, connection);
-      mergeAuditConnection(profile.id, connection);
-      setRouteAuditStatus(remainingStopped ? "stopped" : "complete");
-      setNotice({ tone: "error", text: `${profile.name} 重试失败：${connection.message}` });
+      const finished = mergeRouteAuditConnection(checkingSession, profile, connection);
+      setRouteAuditSession(finished);
+      const persistenceError = await persistRouteAuditSession(finished);
+      if (routeAuditRunId.current !== runId) return;
+      setRouteAuditStatus(routeAuditHistoryHasStale(finished) ? "stale" : remainingStopped ? "stopped" : "complete");
+      setNotice({
+        tone: "error",
+        text: persistenceError
+          ? `${profile.name} 重试失败：${connection.message}；结果未保存：${persistenceError}`
+          : `${profile.name} 重试失败：${connection.message}`,
+      });
     }
   }
 
@@ -764,28 +826,12 @@ export default function App() {
     });
   }
 
-  function mergeAuditConnection(profileId: string, connection: ConnectionCheck) {
-    setRouteAuditSession((current) => {
-      if (!current || !current.entries.some((entry) => entry.id === profileId)) return current;
-      const entries = current.entries.map<RouteAuditEntry>((entry) => (
-        entry.id === profileId
-          ? { id: entry.id, name: entry.name, ...connection }
-          : entry
-      ));
-      return {
-        ...current,
-        finishedAt: connection.state === "checking" ? undefined : Date.now(),
-        entries,
-        summary: summarizeRouteAudit(entries),
-      };
-    });
-  }
-
   function invalidateRouteAudit() {
     routeAuditRunId.current += 1;
     routeAuditStopRequested.current = true;
     setRouteAuditStatus("idle");
     setRouteAuditSession(undefined);
+    void queryClient.invalidateQueries({ queryKey: ["route-audit-results"] });
   }
 
   const busy =
@@ -1016,7 +1062,7 @@ export default function App() {
       </section>
 
       <ProfileEditor mode={editorMode} profile={editorProfile} saving={saveProfile.isPending || createProfile.isPending} windowCloseRequest={windowCloseEditorRequest} onDirtyChange={setProfileDirty} onClose={() => { setProfileDirty(false); setEditorSession(undefined); }} onWindowCloseResolved={() => { setProfileDirty(false); setEditorSession(undefined); if (contextDirty) setWindowCloseContext(true); else closeWindow(); }} onSubmit={(profileId, draft) => profileId ? saveProfile.mutateAsync({ profileId, draft }) : createProfile.mutateAsync(draft)} />
-      <RouteAuditDialog open={routeAuditOpen} profiles={profiles} session={routeAuditSession} status={routeAuditStatus} locked={busy} onOpenChange={setRouteAuditOpen} actions={{ start: () => void startRouteAudit(), stop: stopRouteAudit, retry: (profile) => void retryRouteAuditProfile(profile), edit: editRouteAuditProfile, apply: applyRouteAuditProfile }} />
+      <RouteAuditDialog open={routeAuditOpen} profiles={profiles} session={displayedRouteAuditSession} status={displayedRouteAuditStatus} locked={busy} historyMessage={routeAuditResults.data?.warning ?? (routeAuditResults.error ? messageFor(routeAuditResults.error) : undefined)} onOpenChange={setRouteAuditOpen} actions={{ start: () => void startRouteAudit(), stop: stopRouteAudit, retry: (profile) => void retryRouteAuditProfile(profile), edit: editRouteAuditProfile, apply: applyRouteAuditProfile, reloadHistory: () => void routeAuditResults.refetch() }} />
       <BackupCenterDialog open={backupCenterOpen} locked={busy} restorePending={prepareBackupRestore.isPending} restoreError={prepareBackupRestore.error ? messageFor(prepareBackupRestore.error) : undefined} onOpenChange={(open) => { setBackupCenterOpen(open); if (!open) { pendingBackupRestoreAt.current = undefined; prepareBackupRestore.reset(); } }} onClearRestoreError={() => prepareBackupRestore.reset()} onRestore={(backupId, liveRevision, createdAtUnixMs) => { pendingBackupRestoreAt.current = createdAtUnixMs; prepareBackupRestore.mutate({ backupId, liveRevision }); }} />
       <QuickSwitcher open={quickSwitcherOpen} profiles={profiles} selectedId={selectedProfile?.id} onOpenChange={setQuickSwitcherOpen} onSelect={(profileId) => { setQuickSwitcherOpen(false); selectProfile(profileId); }} onCreate={() => { setQuickSwitcherOpen(false); openProfileEditor("create"); }} />
       <ActionConfirmation confirmation={confirmation} pending={continueAction.isPending} onClose={(token) => { setCloseAfterContextSave(false); setConfirmation(undefined); setDeferredSelectionId(undefined); pendingBackupRestoreAt.current = undefined; void api.dismissConfirmation(token); void refreshContext(); }} onChoice={(token, choice) => continueAction.mutate({ token, choice })} />
@@ -1101,6 +1147,21 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
             <div className="legacy-detail-value"><strong className="legacy-mono">{profile.reviewModel || "跟随默认模型"}</strong></div>
           </div>
         </div>
+        <DeepValidationPanel profile={profile} check={deepValidation} modelDirty={modelDirty} locked={locked} onValidate={onDeepValidate} />
+        <div className="legacy-console-previews">
+          <button type="button" aria-label={`打开上下文设置，${context?.summary ?? "使用 Codex 默认上下文"}`} onClick={() => onPageChange("context")}>
+            <span><Cpu size={16} />上下文</span>
+            <strong>{context?.summary ?? "自动窗口 · 输出不限 · 自动压缩"}</strong>
+            <div className="legacy-mini-budget"><i style={{ width: `${(context?.budget.historyRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.instructionRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.remainingRatio ?? 1) * 100}%` }} /></div>
+            <ChevronRight size={17} />
+          </button>
+          <button type="button" aria-label={`打开用量统计，${todayUsage}`} onClick={() => onPageChange("usage")}>
+            <span><Activity size={16} />今日用量</span>
+            <strong>{todayUsage}</strong>
+            <small>{usage?.hasData ? `输入 ${usage.current.input} · 输出 ${usage.current.output} · ${usage.current.calls}` : "本地会话产生用量后会在这里汇总"}</small>
+            <ChevronRight size={17} />
+          </button>
+        </div>
       </section>
       <aside className="legacy-readiness-panel" aria-label="中转站就绪检查">
         <header><div><span>就绪检查</span><strong className={healthTone}>{healthLabel}</strong></div><button className="legacy-inline-link" type="button" disabled={locked} onClick={onEdit}>编辑配置</button></header>
@@ -1108,22 +1169,7 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
           {readiness.map((item) => <ReadinessItem key={item.label} {...item} />)}
         </div>
         <ConnectionResult connection={connection} />
-        <DeepValidationPanel profile={profile} check={deepValidation} modelDirty={modelDirty} locked={locked} onValidate={onDeepValidate} />
       </aside>
-    </div>
-    <div className="legacy-console-previews">
-      <button type="button" aria-label={`打开上下文设置，${context?.summary ?? "使用 Codex 默认上下文"}`} onClick={() => onPageChange("context")}>
-        <span><Cpu size={16} />上下文</span>
-        <strong>{context?.summary ?? "自动窗口 · 输出不限 · 自动压缩"}</strong>
-        <div className="legacy-mini-budget"><i style={{ width: `${(context?.budget.historyRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.instructionRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.remainingRatio ?? 1) * 100}%` }} /></div>
-        <ChevronRight size={17} />
-      </button>
-      <button type="button" aria-label={`打开用量统计，${todayUsage}`} onClick={() => onPageChange("usage")}>
-        <span><Activity size={16} />今日用量</span>
-        <strong>{todayUsage}</strong>
-        <small>{usage?.hasData ? `输入 ${usage.current.input} · 输出 ${usage.current.output} · ${usage.current.calls}` : "本地会话产生用量后会在这里汇总"}</small>
-        <ChevronRight size={17} />
-      </button>
     </div>
   </div>;
 }
@@ -1373,7 +1419,7 @@ function confirmationClass(intent: ConfirmationIntent) { return intent === "dang
 function statusText(page: Page, contextDirty: boolean, quickModelDirty: boolean, context?: ContextView) { if (page === "context") return contextDirty ? "上下文配置 · 有未保存修改" : context?.status ?? "上下文配置 · 已保存"; if (page === "usage") return "暂无用量数据"; return quickModelDirty ? "默认模型有未保存修改" : "就绪"; }
 function connectionFromAuditEntry(entry: RouteAuditEntry): ConnectionCheck | undefined {
   if (entry.state === "checking") return { state: "checking" };
-  if (entry.state === "success") return { state: "success", models: entry.models, latencyMs: entry.latencyMs, checkedAt: entry.checkedAt };
+  if (entry.state === "success" && entry.models) return { state: "success", models: entry.models, latencyMs: entry.latencyMs, checkedAt: entry.checkedAt };
   if (entry.state === "error") return { state: "error", message: entry.message, checkedAt: entry.checkedAt };
   return undefined;
 }

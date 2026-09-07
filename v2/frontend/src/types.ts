@@ -110,6 +110,44 @@ export type DeepValidationResult = {
   };
 };
 
+export type RouteAuditPersistedResultKind = "success" | "error" | "incomplete" | "stopped";
+export type RouteAuditErrorCategory =
+  | "model_request_failed"
+  | "missing_base_url"
+  | "missing_api_key"
+  | "missing_model"
+  | "missing_multiple_fields"
+  | "unknown";
+export type RouteAuditStaleReason = "profile_changed" | "expired" | "profile_missing" | "unverifiable";
+
+export type RouteAuditHistoryResult = {
+  profileId: string;
+  result: RouteAuditPersistedResultKind;
+  modelCount?: number;
+  modelCheckDurationMs?: number;
+  checkedAtUnixMs: number;
+  errorCategory?: RouteAuditErrorCategory;
+  errorMessage?: string;
+  stale: boolean;
+  staleReasons: RouteAuditStaleReason[];
+};
+
+export type RouteAuditHistoryView = {
+  staleAfterMs: number;
+  results: RouteAuditHistoryResult[];
+  warning?: string;
+};
+
+export type RouteAuditSavedResult =
+  | { profileId: string; result: "success"; modelCount: number; modelCheckDurationMs: number; checkedAtUnixMs: number }
+  | { profileId: string; result: "error"; modelCheckDurationMs?: number; checkedAtUnixMs: number; errorCategory: RouteAuditErrorCategory }
+  | { profileId: string; result: "incomplete"; checkedAtUnixMs: number; errorCategory: RouteAuditErrorCategory }
+  | { profileId: string; result: "stopped"; checkedAtUnixMs: number };
+
+export type RouteAuditSaveRequest = {
+  results: RouteAuditSavedResult[];
+};
+
 export type ContextDraft = {
   useDefaults: boolean;
   windowK: string;

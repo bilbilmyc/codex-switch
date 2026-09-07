@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use codex_switch::v2::{
     AppService, ApplyResponse, BackupCenterView, BackupPreviewView, Bootstrap, ContextDraft,
-    ContextView, DeepValidationView, ModelListView, ProfileDraft, ProfileSummary, UsageView,
+    ContextView, DeepValidationView, ModelListView, ProfileDraft, ProfileSummary,
+    RouteAuditHistoryView, RouteAuditResultDraft, UsageView,
 };
 use tauri::State;
 
@@ -135,6 +136,38 @@ pub async fn deep_validate_profile(
     tauri::async_runtime::spawn_blocking(move || service.deep_validate_profile(profile_id))
         .await
         .map_err(|_| "深度验证任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn load_route_audit_results(
+    state: State<'_, AppState>,
+) -> Result<RouteAuditHistoryView, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.load_route_audit_results())
+        .await
+        .map_err(|_| "巡检历史读取任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn save_route_audit_results(
+    results: Vec<RouteAuditResultDraft>,
+    state: State<'_, AppState>,
+) -> Result<RouteAuditHistoryView, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.save_route_audit_results(results))
+        .await
+        .map_err(|_| "巡检历史保存任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn clear_route_audit_results(state: State<'_, AppState>) -> Result<(), String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.clear_route_audit_results())
+        .await
+        .map_err(|_| "巡检历史清除任务已中断".to_owned())?
         .map_err(|error| error.to_string())
 }
 

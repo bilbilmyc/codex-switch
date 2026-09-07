@@ -242,6 +242,7 @@ enum ApplyWorkerResult {
         state: ManagedState,
         relaunch_error: Option<String>,
         validation_skipped: bool,
+        catalog_warning: Option<String>,
     },
     Conflict {
         detail: String,
@@ -1475,7 +1476,11 @@ impl Controller {
                                     ui.set_model_cache_label(
                                         format!("刚刚获取了 {} 个模型", cache.models.len()).into(),
                                     );
-                                    set_status(&ui, "模型列表已更新", 1);
+                                    set_status(
+                                        &ui,
+                                        "模型 ID 列表已更新；应用时注册目录，调用能力需深度验证",
+                                        1,
+                                    );
                                 }
                                 Err(error) => set_status(
                                     &ui,
@@ -2246,6 +2251,7 @@ fn spawn_apply(
                             state: outcome.state,
                             relaunch_error,
                             validation_skipped,
+                            catalog_warning: outcome.catalog_warning,
                         }
                     }
                     Err(TransactionError::ExternalConflict(conflict)) => {
@@ -2280,20 +2286,23 @@ fn spawn_apply(
                     state,
                     relaunch_error,
                     validation_skipped,
+                    catalog_warning,
                 } => {
                     controller.active = state.active_profile_id;
                     controller.sync_profiles(&ui);
                     ui.set_can_restore(true);
-                    match (relaunch_error, validation_skipped) {
-                        (Some(error), _) => set_status(
-                            &ui,
-                            format!("切换完成，但 Codex Desktop 未能重新打开：{error}"),
-                            2,
-                        ),
-                        (None, true) => {
-                            set_status(&ui, "切换完成；未找到 Codex 校验器，仅完成结构校验", 2)
-                        }
-                        (None, false) => set_status(&ui, "切换完成", 1),
+                    let warnings: Vec<String> = [
+                        relaunch_error.map(|error| format!("Codex Desktop 未能重新打开：{error}")),
+                        validation_skipped.then_some("未找到 Codex 校验器，仅完成结构校验".to_owned()),
+                        catalog_warning,
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                    if warnings.is_empty() {
+                        set_status(&ui, "切换完成", 1);
+                    } else {
+                        set_status(&ui, format!("切换完成；{}", warnings.join("；")), 2);
                     }
                 }
                 ApplyWorkerResult::Conflict {

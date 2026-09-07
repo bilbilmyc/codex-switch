@@ -4,8 +4,8 @@
   "version": "0.2.0-alpha.1",
   "identifier": "com.mayc.codex-switch.v2",
   "build": {
-    "beforeDevCommand": "pnpm --dir ../frontend dev -- --host 127.0.0.1",
-    "beforeBuildCommand": "pnpm --dir ../frontend build",
+    "beforeDevCommand": "pnpm --dir frontend dev -- --host 127.0.0.1",
+    "beforeBuildCommand": "pnpm --dir frontend build",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../frontend/dist"
   },

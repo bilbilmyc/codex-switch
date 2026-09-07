@@ -156,6 +156,7 @@ pub enum RecoveryOutcome {
 pub struct ApplyOutcome {
     pub backup: BackupSummary,
     pub state: ManagedState,
+    pub catalog_warning: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,12 +264,36 @@ impl TransactionManager {
             )));
         }
 
-        let existing_catalog = current.catalog.as_deref();
-        let generated_catalog =
-            model_catalog::merge_supported_model(existing_catalog, &activation.model)
-                .map_err(TransactionError::ModelCatalog)?;
+        let configured_catalog = {
+            let document = current_config
+                .parse::<toml_edit::DocumentMut>()
+                .map_err(|error| TransactionError::ModelCatalog(error.to_string()))?;
+            match document
+                .get("model_catalog_json")
+                .and_then(toml_edit::Item::as_str)
+            {
+                Some(path) => durable_fs::read_optional(&self.paths.codex_dir.join(path))?,
+                None => None,
+            }
+        };
+        let existing_catalog = configured_catalog.as_deref().or(current.catalog.as_deref());
+        let cached_catalog =
+            durable_fs::read_optional(&self.paths.codex_dir.join("models_cache.json"))
+                .ok()
+                .flatten();
+        let generated_catalog = model_catalog::merge_model_catalog(
+            existing_catalog,
+            cached_catalog.as_deref(),
+            &activation.model,
+        )
+        .map_err(TransactionError::ModelCatalog)?;
         let generated_catalog_changed = generated_catalog.is_some();
-        let managed_catalog = generated_catalog.or_else(|| current.catalog.clone());
+        let catalog_warning = generated_catalog
+            .as_ref()
+            .and_then(|catalog| catalog.warning.clone());
+        let managed_catalog = generated_catalog
+            .map(|catalog| catalog.contents)
+            .or_else(|| current.catalog.clone());
         let mut patched_config = patch_codex_config(current_config, activation)?;
         if generated_catalog_changed {
             patched_config.contents = patch_model_catalog_path(
@@ -309,7 +334,11 @@ impl TransactionManager {
             &target,
         )?;
 
-        Ok(ApplyOutcome { backup, state })
+        Ok(ApplyOutcome {
+            backup,
+            state,
+            catalog_warning,
+        })
     }
 
     pub fn update_context(
@@ -360,7 +389,7 @@ impl TransactionManager {
         let patched_config = patch_context_settings(current_config, settings)?;
         if let (Some(validator), Some(auth)) = (validator, current.auth.as_deref()) {
             validator
-                .validate(&patched_config, auth, None)
+                .validate(&patched_config, auth, current.catalog.as_deref())
                 .map_err(TransactionError::StagedValidation)?;
         }
         let target_state = current_state
@@ -2286,7 +2315,116 @@ requires_openai_auth = true
         );
     }
 
+    #[test]
+    fn applying_gpt6_preserves_the_configured_external_catalog() {
+        let (_temp, paths, manager) = fixture();
+        let external = paths.codex_dir.join("external-models.json");
+        let original = br#"{"models":[{"slug":"glm-5.3","display_name":"Keep me"}]}"#;
+        fs::write(&external, original).unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        fs::write(
+            &paths.codex_config,
+            format!("model_catalog_json = \"external-models.json\"\n{config}"),
+        )
+        .unwrap();
+        let first = manager
+            .apply(&activation("gpt-6-astra"), ConflictPolicy::Reject)
+            .unwrap();
+        manager
+            .apply(&activation("gpt-6-astra"), ConflictPolicy::Reject)
+            .unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["models"][0]["display_name"], "Keep me");
+        assert_eq!(catalog["models"][1]["slug"], "gpt-6-astra");
+        assert_eq!(catalog["models"][1]["visibility"], "list");
+        assert_eq!(fs::read(&external).unwrap(), original);
+        let preview = manager.preview_backup(first.backup.id).unwrap();
+        manager
+            .restore_backup(first.backup.id, &preview.live_revision)
+            .unwrap();
+        assert_eq!(fs::read(&external).unwrap(), original);
+        assert!(!paths.managed_model_catalog.exists());
+        assert!(
+            fs::read_to_string(&paths.codex_config)
+                .unwrap()
+                .contains("external-models.json")
+        );
+    }
+
+    #[test]
+    fn future_gpt_apply_uses_cached_metadata_and_preserves_other_models() {
+        let (_temp, paths, manager) = fixture();
+        let mut metadata: serde_json::Value = serde_json::from_slice(
+            &model_catalog::merge_model_catalog(None, None, "glm-5.3")
+                .unwrap()
+                .unwrap()
+                .contents,
+        )
+        .unwrap();
+        metadata["models"][0]["slug"] = serde_json::json!("gpt-99-test");
+        let bytes = serde_json::to_vec(&metadata).unwrap();
+        fs::write(paths.codex_dir.join("models_cache.json"), &bytes).unwrap();
+        let known = manager
+            .apply(&activation("gpt-99-test"), ConflictPolicy::Reject)
+            .unwrap();
+        assert!(known.catalog_warning.is_none());
+        let unknown = manager
+            .apply(&activation("gpt-100-test"), ConflictPolicy::Reject)
+            .unwrap();
+        assert!(unknown.catalog_warning.is_some());
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
+        assert_eq!(catalog["models"][0]["slug"], "gpt-99-test");
+        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        assert_eq!(catalog["models"][1]["slug"], "gpt-100-test");
+        assert_eq!(
+            fs::read(paths.codex_dir.join("models_cache.json")).unwrap(),
+            bytes
+        );
+        let preview = manager.preview_backup(known.backup.id).unwrap();
+        manager
+            .restore_backup(known.backup.id, &preview.live_revision)
+            .unwrap();
+        assert!(!paths.managed_model_catalog.exists());
+        assert_eq!(
+            fs::read_to_string(&paths.codex_config).unwrap(),
+            ORIGINAL_CONFIG
+        );
+    }
+
     struct RejectingValidator;
+
+    #[test]
+    fn context_validation_receives_the_managed_model_catalog() {
+        struct CatalogValidator;
+        impl StagedValidator for CatalogValidator {
+            fn validate(
+                &self,
+                _config: &str,
+                _auth: &[u8],
+                catalog: Option<&[u8]>,
+            ) -> Result<(), String> {
+                let bytes = catalog.ok_or_else(|| "missing model catalog".to_owned())?;
+                let parsed: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+                assert_eq!(parsed["models"][0]["slug"], "gpt-99-test");
+                Ok(())
+            }
+        }
+        let (_temp, _paths, manager) = fixture();
+        manager
+            .apply(&activation("gpt-99-test"), ConflictPolicy::Reject)
+            .unwrap();
+        manager
+            .update_context_with_policy(
+                ContextSettings::default(),
+                ConflictPolicy::Reject,
+                Some(&CatalogValidator),
+            )
+            .unwrap();
+    }
 
     impl StagedValidator for RejectingValidator {
         fn validate(

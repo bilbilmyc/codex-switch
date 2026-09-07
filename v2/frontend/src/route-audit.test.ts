@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  canApplyRouteAuditEntry,
+  mergeRouteAuditConnection,
   profileConfigurationIssue,
+  routeAuditHistoryRefreshCount,
+  routeAuditHistoryToSession,
+  routeAuditSessionToSaveRequest,
+  routeAuditStaleReasonLabel,
   runRouteAudit,
   summarizeRouteAudit,
   type RouteAuditEntry,
@@ -50,6 +56,7 @@ describe("route audit", () => {
     expect(check).toHaveBeenCalledOnce();
     expect(check).toHaveBeenCalledWith(ready);
     expect(session.entries[0]).toMatchObject({ state: "incomplete" });
+    expect(session.entries[0]).toMatchObject({ errorCategory: "missing_multiple_fields" });
     expect(session.entries[1]).toMatchObject({ state: "success", models: modelList(ready.model) });
     expect(session.summary).toMatchObject({ success: 1, incomplete: 1, pending: 0 });
   });
@@ -85,6 +92,7 @@ describe("route audit", () => {
     expect(session.entries.map((entry) => entry.state)).toEqual(["success", "error", "success"]);
     expect(session.entries[0]).toMatchObject({ models: modelList("gpt-5.6-sol") });
     expect(session.entries[1]).toMatchObject({ message: "formatted: upstream unavailable" });
+    expect(session.entries[1]).toMatchObject({ errorCategory: "model_request_failed" });
     expect(formatError).toHaveBeenCalledOnce();
     expect(session.summary).toMatchObject({ success: 2, error: 1, pending: 0 });
     expect(session.summary.fastest?.state).toBe("success");
@@ -167,5 +175,139 @@ describe("route audit", () => {
       pending: 2,
       fastest: entries[2],
     });
+  });
+
+  it("converts persisted summaries without reconstructing models or credentials", () => {
+    const session = routeAuditHistoryToSession({
+      staleAfterMs: 86_400_000,
+      results: [
+        {
+          profileId: "one",
+          result: "success",
+          modelCount: 3,
+          modelCheckDurationMs: 24,
+          checkedAtUnixMs: 10,
+          stale: true,
+          staleReasons: ["profile_changed"],
+        },
+        {
+          profileId: "removed",
+          result: "error",
+          checkedAtUnixMs: 11,
+          errorMessage: "Safe summary",
+          stale: true,
+          staleReasons: ["profile_missing"],
+        },
+      ],
+    }, [profile("one"), profile("new")]);
+
+    expect(session.source).toBe("history");
+    expect(session.entries[0]).toMatchObject({ state: "success", modelCount: 3, history: { stale: true } });
+    expect(session.entries[0]).not.toHaveProperty("models");
+    expect(session.entries[1]).toMatchObject({ name: "已删除的中转站", state: "error", message: "Safe summary" });
+    expect(session.entries[2]).toMatchObject({ id: "new", state: "queued" });
+    expect(routeAuditHistoryRefreshCount(session)).toBe(3);
+    expect(routeAuditStaleReasonLabel("expired", session.staleAfterMs!)).toBe("超过 24 小时");
+
+    const retried = mergeRouteAuditConnection(session, profile("one"), {
+      state: "success",
+      models: modelList("gpt-5.6-sol"),
+      latencyMs: 12,
+      checkedAt: 30,
+    });
+    expect(retried.source).toBe("history");
+    expect(routeAuditHistoryRefreshCount(retried)).toBe(2);
+  });
+
+  it("does not persist stale history as a fresh result", () => {
+    const session = routeAuditHistoryToSession({
+      staleAfterMs: 86_400_000,
+      results: [{
+        profileId: "one",
+        result: "error",
+        checkedAtUnixMs: 20,
+        errorCategory: "model_request_failed",
+        errorMessage: "Do not save this message",
+        stale: true,
+        staleReasons: ["expired"],
+      }],
+    }, [profile("one")]);
+
+    const saved = routeAuditSessionToSaveRequest(session);
+
+    expect(saved).toEqual({ results: [] });
+    expect(JSON.stringify(saved)).not.toContain("Do not save this message");
+    expect(JSON.stringify(saved)).not.toContain("stale");
+    expect(JSON.stringify(saved)).not.toContain("models");
+  });
+
+  it("keeps fresh history and live retries while preserving only redacted fields", () => {
+    const session = routeAuditHistoryToSession({
+      staleAfterMs: 86_400_000,
+      results: [{
+        profileId: "fresh",
+        result: "error",
+        checkedAtUnixMs: 20,
+        errorCategory: "model_request_failed",
+        errorMessage: "Do not save this message",
+        stale: false,
+        staleReasons: [],
+      }],
+    }, [profile("fresh")]);
+    session.entries.push({
+      id: "live",
+      name: "Live retry",
+      state: "success",
+      models: modelList("secret-model"),
+      modelCount: 1,
+      latencyMs: 14,
+      checkedAt: 30,
+    });
+
+    const saved = routeAuditSessionToSaveRequest(session);
+
+    expect(saved).toEqual({ results: [
+      { profileId: "fresh", result: "error", checkedAtUnixMs: 20, errorCategory: "model_request_failed" },
+      { profileId: "live", result: "success", modelCount: 1, modelCheckDurationMs: 14, checkedAtUnixMs: 30 },
+    ] });
+    expect(JSON.stringify(saved)).not.toContain("Do not save this message");
+    expect(JSON.stringify(saved)).not.toContain("secret-model");
+  });
+
+  it("uses the finished time for incomplete and stopped entries", () => {
+    const session = {
+      startedAt: 100,
+      finishedAt: 200,
+      entries: [
+        { id: "incomplete", name: "Incomplete", state: "incomplete" as const, issue: "缺少 API Key", errorCategory: "missing_api_key" as const },
+        { id: "stopped", name: "Stopped", state: "stopped" as const },
+      ],
+      summary: { total: 2, success: 0, error: 0, incomplete: 1, stopped: 1, pending: 0 },
+      source: "live" as const,
+    };
+
+    expect(routeAuditSessionToSaveRequest(session)).toEqual({
+      results: [
+        { profileId: "incomplete", result: "incomplete", checkedAtUnixMs: 200, errorCategory: "missing_api_key" },
+        { profileId: "stopped", result: "stopped", checkedAtUnixMs: 200 },
+      ],
+    });
+    expect(routeAuditStaleReasonLabel("unverifiable", 86_400_000)).toBe("无法验证配置版本");
+  });
+
+  it("never offers live apply actions for historical results", () => {
+    const live: RouteAuditEntry = { id: "live", name: "Live", state: "success", models: modelList("gpt-5.6-sol"), latencyMs: 12, checkedAt: 1 };
+    const historical: RouteAuditEntry = {
+      id: "history",
+      name: "History",
+      state: "success",
+      modelCount: 2,
+      latencyMs: 12,
+      checkedAt: 1,
+      history: { source: "history", stale: false, staleReasons: [], staleAfterMs: 86_400_000 },
+    };
+
+    expect(canApplyRouteAuditEntry(live)).toBe(true);
+    expect(canApplyRouteAuditEntry(historical)).toBe(false);
   });
 });

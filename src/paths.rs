@@ -28,6 +28,8 @@ pub struct AppPaths {
     pub lock: PathBuf,
     pub logs_dir: PathBuf,
     pub model_cache_dir: PathBuf,
+    pub route_audit_results: PathBuf,
+    pub route_audit_revision_key: PathBuf,
     pub managed_model_catalog: PathBuf,
     pub usage_database: PathBuf,
     pub backups_dir: PathBuf,
@@ -56,6 +58,8 @@ impl AppPaths {
             lock: tool_dir.join(".lock"),
             logs_dir: tool_dir.join("logs"),
             model_cache_dir: tool_dir.join("model-cache"),
+            route_audit_results: tool_dir.join("route-audit.json"),
+            route_audit_revision_key: tool_dir.join(".route-audit-key"),
             managed_model_catalog: codex_dir.join("model-catalogs/codex-switch-models.json"),
             usage_database: tool_dir.join("usage.sqlite3"),
             backups_dir: tool_dir.join("backups"),
@@ -127,6 +131,14 @@ mod tests {
         );
         assert_eq!(paths.lock, home.join(".codex-switch/.lock"));
         assert_eq!(paths.logs_dir, home.join(".codex-switch/logs"));
+        assert_eq!(
+            paths.route_audit_results,
+            home.join(".codex-switch/route-audit.json")
+        );
+        assert_eq!(
+            paths.route_audit_revision_key,
+            home.join(".codex-switch/.route-audit-key")
+        );
         assert_eq!(
             paths.model_cache_file(ProfileId::from_uuid(
                 uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
