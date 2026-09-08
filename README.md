@@ -165,7 +165,7 @@ cargo tauri build
 
 Windows 仅生成 NSIS 安装器时使用 `cargo tauri build --bundles nsis`，产物位于 `v2/src-tauri/target/release/bundle/nsis/`；macOS 使用 `cargo tauri build --bundles dmg`。应用名统一为 **Codex Switch**，V2 安装包用于升级 V1。Tauri 的前端钩子以 `v2/` 为工作目录，因此使用 `pnpm --dir frontend`。开发时两版仍共享配置及生命周期锁，不能同时运行。
 
-发布用的 macOS 通用包须在 macOS 上构建：先执行 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`，再在 `v2/src-tauri` 执行 `cargo tauri build --target universal-apple-darwin --bundles dmg`，产物位于 `target/universal-apple-darwin/release/bundle/dmg/`。应用使用临时签名，不包含 Apple 公证。
+发布用的 macOS 通用包须在 macOS 上构建：先执行 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`，再在 `v2/src-tauri` 执行 `cargo tauri build --target universal-apple-darwin --bundles app,dmg`，DMG 位于 `target/universal-apple-darwin/release/bundle/dmg/`，保留的 `.app` 位于相邻的 `macos/` 目录，供架构与签名校验使用。应用使用临时签名，不包含 Apple 公证。
 
 ### V1 历史维护构建
 
