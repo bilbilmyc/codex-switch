@@ -217,6 +217,15 @@ pub async fn prepare_restore(state: State<'_, AppState>) -> Result<ApplyResponse
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn check_applied(profile_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.check_applied(profile_id))
+        .await
+        .map_err(|_| "配置检测任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn load_context(
     profile_id: String,
     state: State<'_, AppState>,

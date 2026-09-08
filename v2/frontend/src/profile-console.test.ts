@@ -31,6 +31,10 @@ const profiles: ProfileSummary[] = [
 ];
 
 describe("profile console", () => {
+  it("checks an applied configuration without asking to apply it again", () => {
+    expect(describeApplyState("applied").action).toBe("检测生效");
+    expect(describeApplyState("applied").routeDetail).not.toContain("正在使用");
+  });
   it("filters profiles by name, model, or base URL without case sensitivity", () => {
     expect(filterProfiles(profiles, "team")).toEqual([profiles[0]]);
     expect(filterProfiles(profiles, "glm-5.3")).toEqual([profiles[1]]);
@@ -59,7 +63,7 @@ describe("profile console", () => {
   });
 
   it.each<[ProfileApplyState, string, string, string]>([
-    ["applied", "当前 Codex 路由", "生效", "success"],
+    ["applied", "当前 Codex 路由", "已应用", "success"],
     ["pending_changes", "当前中转站有未应用修改", "待应用", "warning"],
     ["external_drift", "Codex 配置已被外部修改", "外部变更", "error"],
     ["unknown", "无法确认当前 Codex 路由", "待确认", "unknown"],

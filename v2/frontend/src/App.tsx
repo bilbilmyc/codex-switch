@@ -63,6 +63,7 @@ import {
 } from "./route-audit";
 import type {
   ApplyResponse,
+  Bootstrap,
   Confirmation,
   ConfirmationIntent,
   ContextDraft,
@@ -81,8 +82,8 @@ type EditorSession = { mode: "create" } | { mode: "edit"; profile: ProfileSummar
 type QuickModelDraft = { profileId: string; value: string } | null;
 
 const defaultContext: ContextDraft = {
-  useDefaults: true,
-  windowK: "",
+  useDefaults: false,
+  windowK: "128",
   compactPercent: 80,
 };
 
@@ -337,6 +338,26 @@ export default function App() {
     onSuccess: (response) => void handleActionResponse(response),
     onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
   });
+  const checkApplied = useMutation({
+    mutationFn: (profile: ProfileSummary) => api.checkApplied(profile.id),
+    onSuccess: (matches, profile) => {
+      if (!matches) {
+        queryClient.setQueryData<Bootstrap>(["bootstrap"], (snapshot) => snapshot ? {
+          ...snapshot,
+          profiles: snapshot.profiles.map((candidate) => candidate.id === profile.id
+            ? { ...candidate, applyState: "external_drift" }
+            : candidate),
+        } : snapshot);
+      }
+      setNotice({
+        tone: matches ? "success" : "warning",
+        text: matches
+          ? "检测通过：Codex 配置与设定一致；重启 Codex 后使用"
+          : "检测未通过：Codex 配置与设定不一致，请应用配置",
+      });
+    },
+    onError: (error) => setNotice({ tone: "error", text: `检测失败：${messageFor(error)}` }),
+  });
   const checkConnection = useMutation({
     mutationFn: async (profile: ProfileSummary) => {
       return {
@@ -530,7 +551,9 @@ export default function App() {
     setQuickModelDraft(null);
     setNotice({
       tone: response.warning ? "warning" : "success",
-      text: response.warning ?? "切换完成",
+      text: response.warning
+        ? `${response.warning}；重启 Codex 后使用新配置`
+        : "配置已应用，重启 Codex 后使用",
     });
   }
 
@@ -557,6 +580,10 @@ export default function App() {
       return;
     }
     if (!ensureContextSaved()) return;
+    if (selectedProfile.applyState === "applied" && context.data?.syncState === "synced") {
+      checkApplied.mutate(selectedProfile);
+      return;
+    }
     prepareApply.mutate(selectedProfile.id);
   }
 
@@ -850,7 +877,8 @@ export default function App() {
     updateQuickModel.isPending ||
     continueAction.isPending ||
     saveContext.isPending ||
-    exportUsage.isPending;
+    exportUsage.isPending ||
+    checkApplied.isPending;
   const canSaveContext = contextDirty || context.data?.syncState === "unsynced";
   const modalOpen = Boolean(
     editorSession
@@ -1025,7 +1053,7 @@ export default function App() {
               </div>
               <div className="legacy-header-actions">
                 <ProfileTools profile={selectedProfile} busy={busy} onEdit={() => openProfileEditor("edit")} onDuplicate={() => { if (ensureWorkspaceSaved()) duplicateProfile.mutate(selectedProfile.id); }} onDelete={() => { if (ensureWorkspaceSaved()) setConfirmAction("delete"); }} />
-                <button className="legacy-command-button primary legacy-apply-button" type="button" disabled={busy} onClick={applySelectedProfile}><Route size={15} />{quickModelDirty ? "保存并应用" : selectedApplyState!.action}</button>
+                <button className="legacy-command-button primary legacy-apply-button" type="button" disabled={busy || context.isLoading} onClick={applySelectedProfile}>{selectedProfile.applyState === "applied" && !quickModelDirty && context.data?.syncState === "synced" ? <CircleCheck size={15} /> : <Route size={15} />}{checkApplied.isPending ? "正在检测" : quickModelDirty ? "保存并应用" : selectedProfile.applyState === "applied" && context.data?.syncState !== "synced" ? "应用配置" : selectedApplyState!.action}</button>
               </div>
             </header>
             <RouteBand profile={selectedProfile} context={context.data} connection={connectionChecks[selectedProfile.id]} />
@@ -1212,9 +1240,8 @@ function ContextPage({ context, draft, dirty, loading, onChange }: { context?: C
   const budget = context?.budget;
   return <div className="legacy-scroll-page">
     <Section label="窗口与输出" />
-    <label className="legacy-context-row"><span>上下文窗口</span><div><input aria-label="上下文窗口（K）" value={draft.windowK} disabled={draft.useDefaults || loading} placeholder="自动" inputMode="decimal" onChange={(event) => onChange({ ...draft, useDefaults: false, windowK: event.target.value })} /><b>K</b></div></label>
-    <label className="legacy-context-row"><span>自动压缩阈值</span><div className="legacy-percent-control"><input aria-label="自动压缩阈值" type="range" min="50" max="95" value={draft.compactPercent} disabled={draft.useDefaults || loading} onChange={(event) => onChange({ ...draft, useDefaults: false, compactPercent: Number(event.target.value) })} /><b>{draft.compactPercent}%</b></div></label>
-    <div className="legacy-default-row"><label className="legacy-default-toggle"><input type="checkbox" checked={draft.useDefaults} disabled={loading} onChange={(event) => onChange(event.target.checked ? { ...defaultContext } : { ...draft, useDefaults: false, windowK: draft.windowK || context?.budget.suggestedWindowK || "272" })} /><span><Check size={14} /></span></label><div><strong>使用 Codex 默认上下文</strong><small>自动选择窗口，并沿用 Codex 的自动压缩行为。</small></div><button type="button" onClick={() => onChange({ ...defaultContext })} disabled={loading}>恢复默认</button></div>
+    <label className="legacy-context-row"><span>上下文窗口</span><div><input aria-label="上下文窗口（K）" value={draft.windowK} disabled={loading} placeholder="128" inputMode="decimal" onChange={(event) => onChange({ ...draft, useDefaults: false, windowK: event.target.value })} /><b>K</b></div></label>
+    <label className="legacy-context-row"><span>自动压缩阈值</span><div className="legacy-percent-control"><input aria-label="自动压缩阈值" type="range" min="50" max="95" value={draft.compactPercent} disabled={loading} onChange={(event) => onChange({ ...draft, useDefaults: false, compactPercent: Number(event.target.value) })} /><b>{draft.compactPercent}%</b></div></label>
     <div className="legacy-spacer" />
     <Section label="上下文预算 · 最近会话估算" />
     <div className="legacy-budget-grid"><Metric label="最近会话" value={budget?.recentSession ?? "暂无记录"} /><Metric label="指令文件" value={budget?.instructionTokens ?? "暂无记录"} /><Metric label="可用预算" value={budget?.availableBudget ?? "自动"} /></div>

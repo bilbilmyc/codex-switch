@@ -31,6 +31,7 @@ let previewProfiles: ProfileSummary[] = [
 ];
 
 let previewLiveProfile = { ...previewProfiles[0] };
+const previewContexts = new Map<string, ContextView>();
 
 const previewBackups: BackupCenterView["backups"] = [
   {
@@ -165,6 +166,10 @@ function previewApplyState(
 }
 
 export const api = {
+  async checkApplied(profileId: string): Promise<boolean> {
+    if (isTauri) return invoke<boolean>("check_applied", { profileId });
+    return previewProfiles.find((profile) => profile.id === profileId)?.applyState === "applied";
+  },
   async bootstrap(): Promise<Bootstrap> {
     if (isTauri) return invoke<Bootstrap>("bootstrap");
     return { profiles: previewProfiles, canRestore: false };
@@ -279,11 +284,13 @@ export const api = {
   },
   async loadContext(profileId: string): Promise<ContextView> {
     if (isTauri) return invoke<ContextView>("load_context", { profileId });
+    const saved = previewContexts.get(profileId);
+    if (saved) return saved;
     return {
-      useDefaults: true,
-      windowK: "",
+      useDefaults: false,
+      windowK: "128",
       compactPercent: 80,
-      summary: "自动窗口 · 输出不限 · 自动压缩",
+      summary: "128K 窗口 · 输出不限 · 压缩 80%",
       isActive: true,
       syncState: "synced",
       status: "上下文配置 · 已同步到 Codex",
@@ -294,19 +301,19 @@ export const api = {
         historyRatio: 0,
         instructionRatio: 0,
         remainingRatio: 1,
-        suggestedWindowK: "272",
+        suggestedWindowK: "128",
         instructions: [],
       },
     };
   },
   async saveContext(profileId: string, draft: ContextDraft): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("save_context", { profileId, draft });
-    return {
+    const response: ApplyResponse = {
       kind: "context_saved",
       context: {
         ...draft,
         summary: draft.useDefaults
-          ? "自动窗口 · 输出不限 · 自动压缩"
+          ? "128K 窗口 · 输出不限 · 压缩 80%"
           : `${draft.windowK}K 窗口 · 输出不限 · 压缩 ${draft.compactPercent}%`,
         isActive: true,
         syncState: "synced",
@@ -318,11 +325,13 @@ export const api = {
           historyRatio: 0,
           instructionRatio: 0,
           remainingRatio: 1,
-          suggestedWindowK: "272",
+          suggestedWindowK: "128",
           instructions: [],
         },
       },
     };
+    previewContexts.set(profileId, response.context);
+    return response;
   },
   async refreshUsage(profileId: string, period: string): Promise<UsageView> {
     if (isTauri) return invoke<UsageView>("refresh_usage", { profileId, period });

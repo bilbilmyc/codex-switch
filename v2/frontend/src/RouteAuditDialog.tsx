@@ -99,7 +99,7 @@ function AuditRow({ entry, profile, historicalSession, locked, actions }: { entr
   const canRetry = Boolean(profile) && (entry.state === "success" || entry.state === "error" || entry.state === "stopped");
   const retryVisible = canRetry || entry.state === "checking";
   const retryLocked = locked || entry.state === "checking";
-  const canApply = Boolean(profile) && canApplyRouteAuditEntry(entry);
+  const canApply = Boolean(profile) && profile?.applyState !== "applied" && canApplyRouteAuditEntry(entry);
 
   return <div className={`legacy-audit-row ${presentation.tone}`} aria-label={`${profileName}，${presentation.label}`}>
     <div className="legacy-audit-row-icon">{presentation.icon}</div>

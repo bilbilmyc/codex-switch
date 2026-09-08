@@ -918,6 +918,19 @@ impl AppService {
         })
     }
 
+    pub fn check_applied(&self, profile_id: String) -> Result<bool, ServiceError> {
+        let _operation = self.operation_guard()?;
+        let profile_id = parse_profile_id(&profile_id)?;
+        let document = self.store().load().map_err(ServiceError::profiles)?;
+        let profile = document
+            .get(profile_id)
+            .ok_or_else(|| ServiceError::not_found(profile_id))?;
+        let live = read_live_profile(&self.paths)?;
+        Ok(same_connection(profile, &live)
+            && live.context == Some(configured_context(profile.context))
+            && catalog_matches_context(&self.paths, profile))
+    }
+
     pub fn load_context(&self, profile_id: String) -> Result<ContextView, ServiceError> {
         let _operation = self.operation_guard()?;
         self.migrate_legacy_profiles_if_needed()?;
@@ -1382,11 +1395,12 @@ impl AppService {
 
     fn apply_activation(
         &self,
-        activation: Activation,
+        mut activation: Activation,
         policy: ConflictPolicy,
         desktop_was_closed: bool,
         desktop_executable: Option<PathBuf>,
     ) -> Result<ApplyResponse, ServiceError> {
+        activation.context = Some(configured_context(activation.context));
         let manager = TransactionManager::new(self.paths.clone());
         let validator = CodexStagedValidator::discover_for_desktop(desktop_executable.as_deref());
         let staged_validator = validator
@@ -1580,7 +1594,12 @@ impl AppService {
             .then(|| live_context_settings(&self.paths))
             .flatten();
         let budget = self.context_budget(profile.id, profile.context, is_active, profiles);
-        ContextView::from_profile(profile, is_active, live, budget)
+        let mut view = ContextView::from_profile(profile, is_active, live, budget);
+        if is_active && !catalog_matches_context(&self.paths, profile) {
+            view.sync_state = "unsynced".to_owned();
+            view.status = "模型目录与上下文设定不一致".to_owned();
+        }
+        view
     }
 
     fn context_budget(
@@ -1615,11 +1634,7 @@ impl AppService {
             latest.as_ref().and_then(|usage| usage.cwd.as_deref()),
             &live_config,
         );
-        let effective_window = latest
-            .as_ref()
-            .map(|usage| usage.model_context_window)
-            .filter(|window| *window > 0)
-            .or_else(|| context.and_then(|context| context.model_context_window));
+        let effective_window = configured_context(context).model_context_window;
         let active_context = latest.as_ref().map(|usage| usage.total_tokens).unwrap_or(0);
         let estimated_instructions = instructions.estimated_tokens.min(active_context);
         let other_input = active_context.saturating_sub(estimated_instructions);
@@ -1653,13 +1668,9 @@ impl AppService {
             history_ratio,
             instruction_ratio,
             remaining_ratio,
-            suggested_window_k: latest
-                .as_ref()
-                .map(|usage| usage.model_context_window)
-                .filter(|window| *window > 0)
-                .or_else(|| context.and_then(|context| context.model_context_window))
+            suggested_window_k: effective_window
                 .map(format_context_window_k)
-                .unwrap_or_else(|| "272".to_owned()),
+                .unwrap_or_else(|| "128".to_owned()),
             instructions: instructions
                 .sources
                 .iter()
@@ -1958,9 +1969,8 @@ impl ContextView {
         budget: ContextBudgetView,
     ) -> Self {
         let saved_context = profile.context;
-        let context =
-            saved_context.unwrap_or_else(|| live_context.map(Into::into).unwrap_or_default());
-        let use_defaults = context == ProfileContext::default();
+        let context = configured_context(saved_context);
+        let use_defaults = false;
         let window_k = context
             .model_context_window
             .map(format_context_window_k)
@@ -1980,8 +1990,6 @@ impl ContextView {
             is_active,
             sync_state: if !is_active {
                 "saved_for_switch".to_owned()
-            } else if saved_context.is_none() {
-                "inherited_live".to_owned()
             } else if live_context.is_some_and(|live| ProfileContext::from(live) == context) {
                 "synced".to_owned()
             } else {
@@ -1989,8 +1997,6 @@ impl ContextView {
             },
             status: if !is_active {
                 "上下文配置 · 已保存，切换后生效".to_owned()
-            } else if saved_context.is_none() {
-                "上下文配置 · 沿用当前 Codex 配置".to_owned()
             } else if live_context.is_some_and(|live| ProfileContext::from(live) == context) {
                 "上下文配置 · 已同步到 Codex".to_owned()
             } else {
@@ -2104,11 +2110,9 @@ fn profile_from_draft(
         api_key,
         model: draft.model.trim().to_owned(),
         review_model,
-        // V1 creates a profile with explicit default context settings. Applying a fresh profile
-        // must remove any context overrides left by the previously active relay.
-        context: existing
-            .and_then(|profile| profile.context)
-            .or_else(|| existing.is_none().then_some(ProfileContext::default())),
+        context: Some(configured_context(
+            existing.and_then(|profile| profile.context),
+        )),
     };
     profile.validate().map_err(ServiceError::domain)?;
     Ok(profile)
@@ -2255,9 +2259,7 @@ fn same_connection(left: &Profile, right: &Profile) -> bool {
         && left.api_key == right.api_key
         && left.model == right.model
         && left.review_model == right.review_model
-        && left
-            .context
-            .is_none_or(|context| right.context == Some(context))
+        && configured_context(left.context) == configured_context(right.context)
 }
 
 fn unique_name(document: &ProfilesDocument, preferred: &str) -> String {
@@ -2452,7 +2454,7 @@ fn instruction_source_label(scope: InstructionScope, path: &Path, paths: &AppPat
 
 fn context_from_draft(draft: ContextDraft) -> Result<ProfileContext, ServiceError> {
     if draft.use_defaults {
-        return Ok(ProfileContext::default());
+        return Ok(configured_context(None));
     }
     let window = parse_context_window_k(&draft.window_k)?;
     let percent = u64::from(draft.compact_percent.clamp(50, 95));
@@ -2463,6 +2465,46 @@ fn context_from_draft(draft: ContextDraft) -> Result<ProfileContext, ServiceErro
     };
     context.validate().map_err(ServiceError::domain)?;
     Ok(context)
+}
+
+fn configured_context(context: Option<ProfileContext>) -> ProfileContext {
+    let mut context = context.unwrap_or_default();
+    if context.model_context_window.is_none() {
+        context.model_context_window = Some(crate::model_catalog::DEFAULT_CONTEXT_WINDOW);
+        context
+            .model_auto_compact_token_limit
+            .get_or_insert(compact_limit_for_percent(
+                crate::model_catalog::DEFAULT_CONTEXT_WINDOW,
+                80,
+            ));
+        context
+            .model_auto_compact_token_limit_scope
+            .get_or_insert(AutoCompactScope::Total);
+    }
+    context
+}
+
+fn catalog_matches_context(paths: &AppPaths, profile: &Profile) -> bool {
+    let expected = configured_context(profile.context)
+        .model_context_window
+        .unwrap();
+    let matches = || -> Option<bool> {
+        let config = fs::read_to_string(&paths.codex_config).ok()?;
+        let document = config.parse::<toml_edit::DocumentMut>().ok()?;
+        let path = document.get("model_catalog_json")?.as_str()?;
+        let bytes = fs::read(paths.codex_dir.join(path)).ok()?;
+        let catalog: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+        let model = catalog["models"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["slug"].as_str() == Some(profile.model.as_str()))?;
+        Some(
+            model["context_window"].as_u64() == Some(expected)
+                && model["max_context_window"].as_u64() == Some(expected)
+                && model["effective_context_window_percent"].as_u64() == Some(100),
+        )
+    };
+    matches().unwrap_or(false)
 }
 
 fn parse_context_window_k(input: &str) -> Result<u64, ServiceError> {
@@ -3254,9 +3296,19 @@ requires_openai_auth = true
             )
             .unwrap();
         let config = fs::read_to_string(&service.paths.codex_config).unwrap();
-        let malformed = format!(
-            "model_context_window = \"large\"\nmodel_auto_compact_token_limit = false\nmodel_auto_compact_token_limit_scope = 42\n{config}"
-        );
+        let malformed = config
+            .replace(
+                "model_context_window = 128000",
+                "model_context_window = \"large\"",
+            )
+            .replace(
+                "model_auto_compact_token_limit = 102400",
+                "model_auto_compact_token_limit = false",
+            )
+            .replace(
+                "model_auto_compact_token_limit_scope = \"total\"",
+                "model_auto_compact_token_limit_scope = 42",
+            );
         durable_fs::atomic_write(&service.paths.codex_config, malformed.as_bytes()).unwrap();
 
         let response = service
@@ -3276,23 +3328,97 @@ requires_openai_auth = true
             response => response,
         };
 
+        let response = match response {
+            ApplyResponse::RequiresConfirmation { confirmation } => service
+                .continue_apply(confirmation.token, "preserve_external_and_sync".to_owned())
+                .unwrap(),
+            response => response,
+        };
         let ApplyResponse::ContextSaved { context, .. } = response else {
             panic!("expected restored context to be saved");
         };
-        assert!(context.use_defaults);
+        assert!(!context.use_defaults);
+        assert_eq!(context.window_k, "128");
         assert!(context.is_active);
         assert_eq!(context.sync_state, "synced");
         let restored = fs::read_to_string(&service.paths.codex_config).unwrap();
-        assert!(!restored.contains("model_context_window"));
-        assert!(!restored.contains("model_auto_compact_token_limit ="));
-        assert!(!restored.contains("model_auto_compact_token_limit_scope"));
+        assert!(restored.contains("model_context_window = 128000"));
+        assert!(restored.contains("model_auto_compact_token_limit = 102400"));
+        assert!(restored.contains("model_auto_compact_token_limit_scope = \"total\""));
     }
 
     #[test]
     fn a_new_profile_explicitly_restores_codex_context_defaults_on_apply() {
         let profile = profile_from_draft(ProfileId::new(), None, draft("Relay A")).unwrap();
 
-        assert_eq!(profile.context, Some(ProfileContext::default()));
+        assert_eq!(profile.context, Some(configured_context(None)));
+    }
+
+    #[test]
+    fn check_applied_is_read_only_and_detects_context_catalog_and_model_drift() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        let manager = TransactionManager::new(service.paths.clone());
+        manager
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let files = [
+            &service.paths.codex_config,
+            &service.paths.codex_auth,
+            &service.paths.managed_model_catalog,
+            &service.paths.profiles,
+            &service.paths.state,
+        ];
+        let before: Vec<_> = files
+            .iter()
+            .map(|path| {
+                (
+                    fs::read(path).unwrap(),
+                    fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+            .collect();
+        let backups = fs::read_dir(&service.paths.backups_dir).unwrap().count();
+        for _ in 0..2 {
+            assert!(service.check_applied(created.id.clone()).unwrap());
+        }
+        for (path, (bytes, modified)) in files.iter().zip(before.iter()) {
+            assert_eq!(fs::read(path).unwrap(), *bytes);
+            assert_eq!(fs::metadata(path).unwrap().modified().unwrap(), *modified);
+        }
+        assert_eq!(
+            fs::read_dir(&service.paths.backups_dir).unwrap().count(),
+            backups
+        );
+
+        let mut catalog: serde_json::Value = serde_json::from_slice(&before[2].0).unwrap();
+        catalog["models"][0]["effective_context_window_percent"] = serde_json::json!(90);
+        fs::write(
+            &service.paths.managed_model_catalog,
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+        assert!(!service.check_applied(created.id.clone()).unwrap());
+        fs::write(&service.paths.managed_model_catalog, &before[2].0).unwrap();
+
+        let config = String::from_utf8(before[0].0.clone()).unwrap();
+        fs::write(
+            &service.paths.codex_config,
+            config.replace("128000", "512000"),
+        )
+        .unwrap();
+        assert!(!service.check_applied(created.id.clone()).unwrap());
+        fs::write(
+            &service.paths.codex_config,
+            config.replace("gpt-5.2-codex", "other-model"),
+        )
+        .unwrap();
+        assert!(!service.check_applied(created.id).unwrap());
     }
 
     #[test]
@@ -3616,7 +3742,7 @@ requires_openai_auth = true
     }
 
     #[test]
-    fn v2_apply_registers_unknown_gpt_and_returns_the_compatibility_warning() {
+    fn v2_apply_registers_unknown_gpt_without_a_compatibility_warning() {
         let (_home, service) = service();
         let mut profile = draft("Future GPT Relay");
         profile.model = "gpt-99-test".to_owned();
@@ -3636,12 +3762,17 @@ requires_openai_auth = true
             panic!("expected the V2 apply flow to complete");
         };
         assert_eq!(active_profile_id, created.id);
-        assert!(warning.unwrap().contains("兼容模式"));
+        assert!(!warning.unwrap_or_default().contains("兼容模式"));
         let catalog: serde_json::Value =
             serde_json::from_slice(&fs::read(&service.paths.managed_model_catalog).unwrap())
                 .unwrap();
         assert_eq!(catalog["models"][0]["slug"], "gpt-99-test");
         assert_eq!(catalog["models"][0]["visibility"], "list");
+        assert_eq!(catalog["models"][0]["context_window"], 128_000);
+        assert_eq!(
+            catalog["models"][0]["effective_context_window_percent"],
+            100
+        );
         let config = fs::read_to_string(&service.paths.codex_config).unwrap();
         assert!(config.contains("model-catalogs/codex-switch-models.json"));
     }

@@ -281,10 +281,15 @@ impl TransactionManager {
             durable_fs::read_optional(&self.paths.codex_dir.join("models_cache.json"))
                 .ok()
                 .flatten();
-        let generated_catalog = model_catalog::merge_model_catalog(
+        let window = activation
+            .context
+            .and_then(|context| context.model_context_window)
+            .unwrap_or(model_catalog::DEFAULT_CONTEXT_WINDOW);
+        let generated_catalog = model_catalog::merge_model_catalog_with_window(
             existing_catalog,
             cached_catalog.as_deref(),
             &activation.model,
+            window,
         )
         .map_err(TransactionError::ModelCatalog)?;
         let generated_catalog_changed = generated_catalog.is_some();
@@ -368,11 +373,8 @@ impl TransactionManager {
         let current = self.read_live_snapshot()?;
         let current_config = config_text(&self.paths.codex_config, current.config.as_deref())?;
         let current_state = deserialize_state(current.state.as_deref())?;
-        let (actual_projection, actual_fingerprint) = current_relevant_state(
-            current_config,
-            current.auth.as_deref(),
-            settings == ContextSettings::default(),
-        )?;
+        let (actual_projection, actual_fingerprint) =
+            current_relevant_state(current_config, current.auth.as_deref(), true)?;
         if policy == ConflictPolicy::Reject
             && let Some(state) = &current_state
             && !state_fingerprint_matches(state, &actual_fingerprint, &actual_projection)?
@@ -386,10 +388,32 @@ impl TransactionManager {
             )));
         }
 
-        let patched_config = patch_context_settings(current_config, settings)?;
+        let context_source =
+            if crate::codex_config::inspect_context_settings(current_config).is_err() {
+                patch_context_settings(current_config, ContextSettings::default())?
+            } else {
+                current_config.to_owned()
+            };
+        let patched_config = patch_context_settings(&context_source, settings)?;
+        let catalog = match (
+            current.catalog.as_deref(),
+            actual_projection.config.model.as_deref(),
+        ) {
+            (Some(existing), Some(model)) => model_catalog::merge_model_catalog_with_window(
+                Some(existing),
+                None,
+                model,
+                settings
+                    .model_context_window
+                    .unwrap_or(model_catalog::DEFAULT_CONTEXT_WINDOW),
+            )
+            .map_err(TransactionError::ModelCatalog)?
+            .map(|update| update.contents),
+            _ => current.catalog.clone(),
+        };
         if let (Some(validator), Some(auth)) = (validator, current.auth.as_deref()) {
             validator
-                .validate(&patched_config, auth, current.catalog.as_deref())
+                .validate(&patched_config, auth, catalog.as_deref())
                 .map_err(TransactionError::StagedValidation)?;
         }
         let target_state = current_state
@@ -403,7 +427,7 @@ impl TransactionManager {
             config: Some(patched_config.into_bytes()),
             auth: current.auth.clone(),
             state: target_state,
-            catalog: current.catalog.clone(),
+            catalog,
         };
         self.commit_snapshot(TransactionOperation::UpdateContext, &current, &target)
     }
@@ -2119,7 +2143,7 @@ requires_openai_auth = true
         assert!(preview.file_changes.config);
         assert!(preview.file_changes.auth);
         assert!(preview.file_changes.state);
-        assert!(!preview.file_changes.catalog);
+        assert!(preview.file_changes.catalog);
         assert!(!format!("{preview:?}").contains("sk-new-secret"));
         assert!(!format!("{preview:?}").contains("sk-old"));
     }
@@ -2282,6 +2306,54 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn configured_window_is_written_without_a_catalog_discount() {
+        let (_temp, paths, manager) = fixture();
+        let mut selected = activation("gpt-99-test");
+        selected.context = Some(ProfileContext {
+            model_context_window: Some(512_000),
+            model_auto_compact_token_limit: Some(409_600),
+            ..ProfileContext::default()
+        });
+        let result = manager.apply(&selected, ConflictPolicy::Reject).unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(catalog["models"][0]["context_window"], 512_000);
+        assert_eq!(catalog["models"][0]["max_context_window"], 512_000);
+        assert_eq!(
+            catalog["models"][0]["effective_context_window_percent"],
+            100
+        );
+        assert_eq!(catalog["models"][0]["support_verbosity"], true);
+        assert!(result.catalog_warning.is_none());
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model_context_window = 512000"));
+        assert!(config.contains("model_auto_compact_token_limit = 409600"));
+        let next = ContextSettings {
+            model_context_window: Some(256_123),
+            model_auto_compact_token_limit: Some(204_898),
+            model_auto_compact_token_limit_scope: Some(crate::domain::AutoCompactScope::Total),
+        };
+        manager
+            .update_context_with_policy(next, ConflictPolicy::Reject, None)
+            .unwrap();
+        let updated: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(updated["models"][0]["context_window"], 256_123);
+        assert_eq!(updated["models"][0]["max_context_window"], 256_123);
+        assert_eq!(
+            updated["models"][0]["effective_context_window_percent"],
+            100
+        );
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(config.contains("model_context_window = 256123"));
+        assert!(config.contains("model_auto_compact_token_limit = 204898"));
+        manager.restore_latest().unwrap();
+        let restored: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
+        assert_eq!(restored["models"][0]["context_window"], 512_000);
+    }
+
+    #[test]
     fn restoring_a_backup_removes_a_catalog_created_by_a_supported_model() {
         let (_temp, paths, manager) = fixture();
 
@@ -2373,12 +2445,12 @@ requires_openai_auth = true
         let unknown = manager
             .apply(&activation("gpt-100-test"), ConflictPolicy::Reject)
             .unwrap();
-        assert!(unknown.catalog_warning.is_some());
+        assert!(unknown.catalog_warning.is_none());
         let catalog: serde_json::Value =
             serde_json::from_slice(&fs::read(&paths.managed_model_catalog).unwrap()).unwrap();
         assert_eq!(catalog["models"].as_array().unwrap().len(), 2);
         assert_eq!(catalog["models"][0]["slug"], "gpt-99-test");
-        assert_eq!(catalog["models"][0]["context_window"], 1_048_576);
+        assert_eq!(catalog["models"][0]["context_window"], 128_000);
         assert_eq!(catalog["models"][1]["slug"], "gpt-100-test");
         assert_eq!(
             fs::read(paths.codex_dir.join("models_cache.json")).unwrap(),

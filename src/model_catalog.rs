@@ -2,8 +2,7 @@ use serde_json::{Map, Value, json};
 
 pub const MANAGED_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codex-switch-models.json";
 
-const GPT_COMPATIBILITY_DESCRIPTION: &str =
-    "GPT relay compatibility profile (unverified conservative limits)";
+pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 
 #[derive(Debug)]
 pub struct CatalogUpdate {
@@ -23,6 +22,15 @@ pub fn merge_model_catalog(
     existing: Option<&[u8]>,
     cached: Option<&[u8]>,
     model: &str,
+) -> Result<Option<CatalogUpdate>, String> {
+    merge_model_catalog_with_window(existing, cached, model, DEFAULT_CONTEXT_WINDOW)
+}
+
+pub fn merge_model_catalog_with_window(
+    existing: Option<&[u8]>,
+    cached: Option<&[u8]>,
+    model: &str,
+    context_window: u64,
 ) -> Result<Option<CatalogUpdate>, String> {
     let cached_root = cached.and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
     let mut root = match existing {
@@ -59,7 +67,7 @@ pub fn merge_model_catalog(
                 .find(|candidate| usable_entry(candidate, slug))
         });
     let selected = existing_entry
-        .filter(|candidate| !is_compatibility_entry(candidate))
+        .filter(|candidate| !is_generated_entry(candidate))
         .or(cached_entry)
         .or(existing_entry)
         .cloned()
@@ -67,9 +75,13 @@ pub fn merge_model_catalog(
     let Some(mut selected) = selected else {
         return Ok(None);
     };
-    let warning = is_compatibility_entry(&selected).then(|| {
-        "模型已注册为兼容模式，能力与调用尚未验证；仅配置文本输入、128K 上下文和 low/medium/high 推理档位。请先深度验证，并重新启动 Codex。".to_owned()
-    });
+    if is_generated_entry(&selected) {
+        selected["description"] = json!("User-configured relay model");
+        selected["support_verbosity"] = json!(true);
+    }
+    selected["context_window"] = json!(context_window);
+    selected["max_context_window"] = json!(context_window);
+    selected["effective_context_window_percent"] = json!(100);
     selected["visibility"] = json!("list");
     if let Some(index) = models
         .iter()
@@ -81,7 +93,12 @@ pub fn merge_model_catalog(
     }
 
     serde_json::to_vec_pretty(&root)
-        .map(|contents| Some(CatalogUpdate { contents, warning }))
+        .map(|contents| {
+            Some(CatalogUpdate {
+                contents,
+                warning: None,
+            })
+        })
         .map_err(|error| format!("could not serialize managed model catalog: {error}"))
 }
 
@@ -109,55 +126,20 @@ fn usable_entry(candidate: &Value, slug: &str) -> bool {
             })
 }
 
-fn is_compatibility_entry(candidate: &Value) -> bool {
+fn is_generated_entry(candidate: &Value) -> bool {
     matches!(
         candidate["description"].as_str(),
         Some(
-            GPT_COMPATIBILITY_DESCRIPTION
+            "User-configured relay model"
+                | "GPT relay compatibility profile (unverified conservative limits)"
                 | "GPT-6 Astra relay compatibility profile (conservative limits)"
         )
     )
 }
 
-fn is_gpt_text_model(model: &str) -> bool {
-    model
-        .strip_prefix("gpt-")
-        .and_then(|suffix| suffix.chars().next())
-        .is_some_and(|first| first.is_ascii_digit())
-        && !model.split(['-', '.']).any(|part| {
-            matches!(
-                part,
-                "image"
-                    | "audio"
-                    | "realtime"
-                    | "transcribe"
-                    | "tts"
-                    | "embedding"
-                    | "embeddings"
-                    | "moderation"
-                    | "video"
-                    | "search"
-            )
-        })
-}
-
 fn supported_entry(model: &str) -> Option<Value> {
     let normalized = model.trim();
     let lower = normalized.to_ascii_lowercase();
-    if is_gpt_text_model(&lower) {
-        return Some(entry(
-            normalized,
-            GPT_COMPATIBILITY_DESCRIPTION,
-            "medium",
-            json!([
-                { "effort": "low", "description": "Light reasoning" },
-                { "effort": "medium", "description": "Balanced reasoning" },
-                { "effort": "high", "description": "Enhanced reasoning" }
-            ]),
-            128_000,
-            90,
-        ));
-    }
     if lower.starts_with("glm-") {
         return Some(entry(
             normalized,
@@ -168,8 +150,8 @@ fn supported_entry(model: &str) -> Option<Value> {
                 { "effort": "high", "description": "Enhanced reasoning" },
                 { "effort": "max", "description": "Deep reasoning" }
             ]),
-            1_048_576,
-            95,
+            DEFAULT_CONTEXT_WINDOW,
+            100,
         ));
     }
     if lower.starts_with("deepseek-") && lower != "deepseek-v4-pro" {
@@ -182,8 +164,8 @@ fn supported_entry(model: &str) -> Option<Value> {
                 { "effort": "medium", "description": "Balanced reasoning" },
                 { "effort": "high", "description": "Enhanced reasoning" }
             ]),
-            128_000,
-            90,
+            DEFAULT_CONTEXT_WINDOW,
+            100,
         ));
     }
     if lower.starts_with("qwen3") && !lower.contains("-vl-") {
@@ -197,11 +179,25 @@ fn supported_entry(model: &str) -> Option<Value> {
                 { "effort": "high", "description": "Enhanced reasoning" },
                 { "effort": "xhigh", "description": "Extra high reasoning" }
             ]),
-            500_000,
-            95,
+            DEFAULT_CONTEXT_WINDOW,
+            100,
         ));
     }
-    None
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(entry(
+        normalized,
+        "User-configured relay model",
+        "medium",
+        json!([
+            { "effort": "low", "description": "Light reasoning" },
+            { "effort": "medium", "description": "Balanced reasoning" },
+            { "effort": "high", "description": "Enhanced reasoning" }
+        ]),
+        DEFAULT_CONTEXT_WINDOW,
+        100,
+    ))
 }
 
 fn entry(
@@ -231,7 +227,7 @@ fn entry(
     value.insert("base_instructions".to_owned(), json!(""));
     value.insert("supports_reasoning_summaries".to_owned(), json!(true));
     value.insert("default_reasoning_summary".to_owned(), json!("none"));
-    value.insert("support_verbosity".to_owned(), json!(false));
+    value.insert("support_verbosity".to_owned(), json!(true));
     value.insert("apply_patch_tool_type".to_owned(), json!("freeform"));
     value.insert(
         "truncation_policy".to_owned(),
@@ -258,6 +254,7 @@ mod tests {
         known["slug"] = json!(model);
         known["display_name"] = json!(model);
         known["base_instructions"] = json!("Preserve these instructions");
+        known["context_window"] = json!(1_048_576);
         serde_json::to_vec(&json!({"models": [known]})).unwrap()
     }
 
@@ -269,7 +266,10 @@ mod tests {
             .unwrap();
         assert!(update.warning.is_none());
         let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
-        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+        assert_eq!(
+            parsed["models"][0]["context_window"],
+            DEFAULT_CONTEXT_WINDOW
+        );
         assert_eq!(
             parsed["models"][0]["base_instructions"],
             "Preserve these instructions"
@@ -277,11 +277,11 @@ mod tests {
     }
 
     #[test]
-    fn cached_metadata_upgrades_compatibility_entries_without_duplicates() {
+    fn cached_metadata_upgrades_generated_entries_without_duplicates() {
         let first = merge_model_catalog(None, None, "gpt-99-test")
             .unwrap()
             .unwrap();
-        assert!(first.warning.is_some());
+        assert!(first.warning.is_none());
         let cache = known_catalog("gpt-99-test");
         let second = merge_model_catalog(Some(&first.contents), Some(&cache), "gpt-99-test")
             .unwrap()
@@ -289,7 +289,14 @@ mod tests {
         assert!(second.warning.is_none());
         let parsed: Value = serde_json::from_slice(&second.contents).unwrap();
         assert_eq!(parsed["models"].as_array().unwrap().len(), 1);
-        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+        assert_eq!(
+            parsed["models"][0]["context_window"],
+            DEFAULT_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            parsed["models"][0]["base_instructions"],
+            "Preserve these instructions"
+        );
     }
 
     #[test]
@@ -302,18 +309,21 @@ mod tests {
             .unwrap()
             .unwrap();
         let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
-        assert_eq!(parsed["models"][0]["context_window"], 1_048_576);
+        assert_eq!(
+            parsed["models"][0]["context_window"],
+            DEFAULT_CONTEXT_WINDOW
+        );
     }
 
     #[test]
-    fn compatibility_retains_warning_on_repeated_apply() {
+    fn repeated_apply_is_stable_without_compatibility_warnings() {
         let first = merge_model_catalog(None, None, "gpt-99-test")
             .unwrap()
             .unwrap();
         let second = merge_model_catalog(Some(&first.contents), None, "gpt-99-test")
             .unwrap()
             .unwrap();
-        assert!(second.warning.is_some());
+        assert!(second.warning.is_none());
         assert_eq!(first.contents, second.contents);
     }
 
@@ -323,7 +333,7 @@ mod tests {
         let update = merge_model_catalog(None, Some(&cache), "gpt-99-test-mini")
             .unwrap()
             .unwrap();
-        assert!(update.warning.is_some());
+        assert!(update.warning.is_none());
         let parsed: Value = serde_json::from_slice(&update.contents).unwrap();
         assert_eq!(parsed["models"].as_array().unwrap().len(), 2);
         assert_eq!(parsed["models"][1]["context_window"], 128_000);
@@ -336,7 +346,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .warning
-                .is_some()
+                .is_none()
         );
         assert!(merge_model_catalog(Some(b"broken"), None, "gpt-99-test").is_err());
     }
@@ -349,12 +359,12 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .warning
-                .is_some()
+                .is_none()
         );
     }
 
     #[test]
-    fn non_agent_model_names_are_not_automatically_registered() {
+    fn explicit_model_ids_are_registered_without_name_based_restrictions() {
         for model in [
             "gpt-image-99",
             "gpt-99-test-image",
@@ -368,7 +378,7 @@ mod tests {
             "unrecognized-model",
         ] {
             assert!(
-                merge_model_catalog(None, None, model).unwrap().is_none(),
+                merge_model_catalog(None, None, model).unwrap().is_some(),
                 "{model}"
             );
         }
@@ -385,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn existing_capabilities_are_not_overwritten_by_a_builtin_profile() {
+    fn non_context_capabilities_are_preserved() {
         let mut known = supported_entry("glm-5.3").unwrap();
         known["context_window"] = json!(256_000);
         known["input_modalities"] = json!(["text", "image"]);
@@ -394,19 +404,21 @@ mod tests {
             .unwrap()
             .unwrap();
         let parsed: Value = serde_json::from_slice(&merged).unwrap();
+        known["context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
         assert_eq!(parsed["models"][0], known);
     }
 
     #[test]
-    fn supports_only_the_intended_text_model_families() {
+    fn accepts_explicit_models_without_a_family_allowlist() {
         assert!(is_supported_model("gpt-6-astra"));
         assert!(is_supported_model("glm-5.3"));
         assert!(is_supported_model("deepseek-v4-flash"));
         assert!(is_supported_model("qwen3.8-max"));
-        assert!(!is_supported_model("kimi-k3"));
-        assert!(!is_supported_model("deepseek-v4-pro"));
-        assert!(!is_supported_model("qwen3-vl-plus"));
-        assert!(!is_supported_model("qwen-image-max"));
+        assert!(is_supported_model("kimi-k3"));
+        assert!(is_supported_model("deepseek-v4-pro"));
+        assert!(is_supported_model("qwen3-vl-plus"));
+        assert!(is_supported_model("qwen-image-max"));
+        assert!(!is_supported_model(""));
     }
 
     #[test]

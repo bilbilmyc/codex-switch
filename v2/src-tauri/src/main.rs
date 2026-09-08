@@ -65,6 +65,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             commands::prepare_backup_restore,
             commands::prepare_restore,
             commands::load_context,
+            commands::check_applied,
             commands::save_context,
             commands::refresh_usage,
             commands::export_usage,
