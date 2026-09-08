@@ -3322,13 +3322,20 @@ requires_openai_auth = true
                 },
             )
             .unwrap();
+        // CI may go straight to the conflict prompt when Codex is not running.
         let response = match response {
-            ApplyResponse::RequiresConfirmation { confirmation } => service
-                .continue_apply(confirmation.token, "sync_anyway".to_owned())
-                .unwrap(),
+            ApplyResponse::RequiresConfirmation { confirmation }
+                if confirmation
+                    .options
+                    .iter()
+                    .any(|option| option.id == "sync_anyway") =>
+            {
+                service
+                    .continue_apply(confirmation.token, "sync_anyway".to_owned())
+                    .unwrap()
+            }
             response => response,
         };
-
         let response = match response {
             ApplyResponse::RequiresConfirmation { confirmation } => service
                 .continue_apply(confirmation.token, "preserve_external_and_sync".to_owned())
