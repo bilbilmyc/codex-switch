@@ -146,7 +146,7 @@ jobs:
         shell: bash
         run: |
           app="v2/src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Switch.app"
-          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/codex-switch"
+          lipo "$app/Contents/MacOS/codex-switch" -verify_arch arm64 x86_64
           codesign --verify --deep --strict --verbose=2 "$app"
           hdiutil verify ${{ matrix.package_glob }}
       - name: Upload V2 installer artifact
