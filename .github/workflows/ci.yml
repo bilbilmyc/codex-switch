@@ -49,6 +49,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            v2/src-tauri -> target
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Check V2 Tauri formatting
@@ -85,31 +89,13 @@ jobs:
       - name: Build frontend
         run: pnpm build
 
-  create-release:
-    name: Create GitHub Release
-    needs: [check, frontend, validate-release-version]
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-
   package-v2:
     name: Package V2 (${{ matrix.name }})
-    needs: [check, frontend, validate-release-version, create-release]
-    if: >-
-      always() &&
-      needs.check.result == 'success' &&
-      needs.frontend.result == 'success' &&
-      needs.validate-release-version.result == 'success' &&
-      (needs.create-release.result == 'success' || github.event_name == 'workflow_dispatch')
+    needs: [check, frontend, validate-release-version]
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -117,15 +103,23 @@ jobs:
           - name: macOS
             os: macos-latest
             bundle: dmg
-            package_glob: v2/src-tauri/target/release/bundle/dmg/*.dmg
+            target: universal-apple-darwin
+            rust_targets: aarch64-apple-darwin,x86_64-apple-darwin
+            package_glob: v2/src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           - name: Windows
             os: windows-latest
             bundle: nsis
-            package_glob: v2/src-tauri/target/release/bundle/nsis/*-setup.exe
+            target: x86_64-pc-windows-msvc
+            rust_targets: x86_64-pc-windows-msvc
+            package_glob: v2/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_targets }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: v2/src-tauri -> target
       - uses: pnpm/action-setup@v4
         with:
           version: 11.19.0
@@ -137,20 +131,58 @@ jobs:
       - name: Install V2 frontend dependencies
         working-directory: v2/frontend
         run: pnpm install --frozen-lockfile
-      - name: Install Tauri CLI
-        run: cargo install tauri-cli --version "^2" --locked
       - name: Build V2 native installer
         working-directory: v2/src-tauri
-        run: cargo tauri build --bundles ${{ matrix.bundle }}
+        run: pnpm dlx @tauri-apps/cli@2.11.4 build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - name: Verify Windows GUI executables
+        if: matrix.name == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem -LiteralPath v2/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*-setup.exe')
+          if ($installer.Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          ./scripts/check_windows_subsystem.ps1 -Path @('v2/src-tauri/target/x86_64-pc-windows-msvc/release/codex-switch.exe', $installer[0].FullName)
+      - name: Verify macOS universal app and disk image
+        if: matrix.name == 'macOS'
+        shell: bash
+        run: |
+          app="v2/src-tauri/target/universal-apple-darwin/release/bundle/macos/Codex Switch.app"
+          lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/codex-switch"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          hdiutil verify ${{ matrix.package_glob }}
       - name: Upload V2 installer artifact
         uses: actions/upload-artifact@v4
         with:
           name: codex-switch-${{ matrix.name }}
           path: ${{ matrix.package_glob }}
           if-no-files-found: error
-      - name: Upload V2 installer to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+
+  publish-release:
+    name: Publish Windows and macOS release
+    needs: [package-v2]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: codex-switch-*
+          path: release
+          merge-multiple: true
+      - name: Require both platform installers
+        shell: bash
+        run: |
+          shopt -s nullglob
+          windows=(release/*-setup.exe)
+          macos=(release/*_universal.dmg)
+          test "${#windows[@]}" -eq 1
+          test "${#macos[@]}" -eq 1
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.package_glob }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            release/*-setup.exe
+            release/*_universal.dmg
           fail_on_unmatched_files: true

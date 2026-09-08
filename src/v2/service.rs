@@ -3532,6 +3532,11 @@ requires_openai_auth = true
         let mut future = valid.clone();
         future.checked_at_unix_ms = now + ROUTE_AUDIT_MAX_FUTURE_SKEW_MS + 1;
         assert!(matches!(
+            validate_route_audit_drafts(&[future.clone()], now),
+            Err(ServiceError::RouteAudit)
+        ));
+        future.checked_at_unix_ms = u64::MAX;
+        assert!(matches!(
             service.save_route_audit_results(vec![future]),
             Err(ServiceError::RouteAudit)
         ));

@@ -113,8 +113,8 @@ GPT 兼容配置采用 128,000 上下文、文本输入、low/medium/high 推理
 
 发布产物按平台生成：
 
-- macOS：`Codex Switch.app` 和 `.dmg`。
-- Windows：NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
+- macOS：通用版 `Codex Switch.app` 和 `_universal.dmg`，同时包含 Apple Silicon（arm64）与 Intel（x86_64）。
+- Windows：x64 NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
 
 V2 沿用 V1 的应用名 `Codex Switch`、应用标识 `com.mayc.codex-switch` 和可执行文件名 `codex-switch`。Windows 安装器会识别 V1，默认使用原安装目录进行升级，不再作为独立的 `Codex Switch V2` 安装；macOS 将新版 `Codex Switch.app` 拖入原“应用程序”目录并确认替换即可。升级前退出旧版应用。两版共享 `~/.codex-switch` 和 `~/.codex`，升级不清理这些目录，中转站、密钥和备份继续使用。
 
@@ -165,6 +165,8 @@ cargo tauri build
 
 Windows 仅生成 NSIS 安装器时使用 `cargo tauri build --bundles nsis`，产物位于 `v2/src-tauri/target/release/bundle/nsis/`；macOS 使用 `cargo tauri build --bundles dmg`。应用名统一为 **Codex Switch**，V2 安装包用于升级 V1。Tauri 的前端钩子以 `v2/` 为工作目录，因此使用 `pnpm --dir frontend`。开发时两版仍共享配置及生命周期锁，不能同时运行。
 
+发布用的 macOS 通用包须在 macOS 上构建：先执行 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`，再在 `v2/src-tauri` 执行 `cargo tauri build --target universal-apple-darwin --bundles dmg`，产物位于 `target/universal-apple-darwin/release/bundle/dmg/`。应用使用临时签名，不包含 Apple 公证。
+
 ### V1 历史维护构建
 
 仅用于维护验证，不上传到主线 Release；安装旧包会替换当前 V2，不应将其作为主线升级包分发。
@@ -178,7 +180,7 @@ cargo packager --release
 
 原生安装包应在对应目标系统上构建，默认输出到 `target/release/`。配置中的 `formats = ["default"]` 在 macOS 上生成 `.app` 与 `.dmg`，在 Windows 上生成 NSIS 安装器。Windows 安装器使用 `currentUser` 模式。macOS 打包后还需要运行 `scripts/normalize_macos_dmg.sh target/release/*.dmg`，以清除安装盘的应用图标，避免 Finder 在卷图标上叠加状态标识。
 
-GitHub Actions 在 `main` 执行共享后端和 V2 检查。手动运行工作流会构建 V2 `.dmg` 与 NSIS `.exe` 并保留构件；推送与 `v2/src-tauri/Cargo.toml` 版本一致的 `v<version>` tag 时，将这些 V2 安装包上传至 Release，不再发布 V1 安装包。V2 的 Cargo、Tauri 和前端版本必须一致，根目录 Cargo 版本仅属于共享库及 V1。
+GitHub Actions 在 `main` 执行共享后端和 V2 检查。手动运行工作流会构建 V2 macOS 通用 `.dmg` 与 Windows x64 NSIS `.exe` 并保留构件；推送与 `v2/src-tauri/Cargo.toml` 版本一致的正式 `v<version>` tag 时，只有两端都构建成功并通过产物检查后，才一起发布为最新 Release，不再发布 V1 安装包。Windows 检查程序和安装器的 GUI 子系统；macOS 检查双架构、签名和 DMG 完整性。V2 的 Cargo、Tauri 和前端版本必须一致，根目录 Cargo 版本仅属于共享库及 V1。
 
 ## 许可
 
