@@ -1352,12 +1352,11 @@ button:disabled {
   color: var(--color-danger);
 }
 
-.legacy-status-dot {
-  width: 8px;
-  height: 8px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  background: var(--color-line-strong);
+.legacy-status-icon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  color: currentColor;
 }
 
 .legacy-command-button {

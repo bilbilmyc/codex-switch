@@ -30,6 +30,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { api } from "./api";
+import { StatusIcon } from "./StatusIcon";
 import { BackupCenterDialog, formatBackupLocalTime } from "./BackupCenterDialog";
 import {
   deepValidationActionLabel,
@@ -1069,7 +1070,7 @@ export default function App() {
             </section>
             <footer className="legacy-statusbar">
               <div className={`legacy-status ${notice?.tone ?? "idle"}`} role="status">
-                {busy || usage.isFetching || checkConnection.isPending ? <RefreshCw className="spin" size={15} /> : <span className="legacy-status-dot" />}
+                <StatusIcon busy={busy || usage.isFetching || checkConnection.isPending} tone={notice?.tone} />
                 <span>{notice?.text ?? (page === "usage" ? usage.error ? `本地用量读取失败：${messageFor(usage.error)}` : usage.data?.status ?? "正在读取本地用量数据" : statusText(page, contextDirty, quickModelDirty, context.data))}</span>
               </div>
               {page === "relay" && <>

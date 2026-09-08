@@ -1597,7 +1597,7 @@ impl AppService {
         let mut view = ContextView::from_profile(profile, is_active, live, budget);
         if is_active && !catalog_matches_context(&self.paths, profile) {
             view.sync_state = "unsynced".to_owned();
-            view.status = "模型目录与上下文设定不一致".to_owned();
+            view.status = "模型目录与当前设定不一致".to_owned();
         }
         view
     }
@@ -2501,7 +2501,8 @@ fn catalog_matches_context(paths: &AppPaths, profile: &Profile) -> bool {
         Some(
             model["context_window"].as_u64() == Some(expected)
                 && model["max_context_window"].as_u64() == Some(expected)
-                && model["effective_context_window_percent"].as_u64() == Some(100),
+                && model["effective_context_window_percent"].as_u64() == Some(100)
+                && crate::model_catalog::has_selectable_capabilities(model),
         )
     };
     matches().unwrap_or(false)
@@ -3404,6 +3405,34 @@ requires_openai_auth = true
         )
         .unwrap();
         assert!(!service.check_applied(created.id.clone()).unwrap());
+        fs::write(&service.paths.managed_model_catalog, &before[2].0).unwrap();
+
+        for field in ["input_modalities", "supported_reasoning_levels"] {
+            let mut catalog: serde_json::Value = serde_json::from_slice(&before[2].0).unwrap();
+            catalog["models"][0][field]
+                .as_array_mut()
+                .unwrap()
+                .retain(|value| {
+                    if field == "input_modalities" {
+                        value != "image"
+                    } else {
+                        value["effort"] != "ultra"
+                    }
+                });
+            fs::write(
+                &service.paths.managed_model_catalog,
+                serde_json::to_vec(&catalog).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                !service.check_applied(created.id.clone()).unwrap(),
+                "{field}"
+            );
+            assert_eq!(
+                service.load_context(created.id.clone()).unwrap().sync_state,
+                "unsynced"
+            );
+        }
         fs::write(&service.paths.managed_model_catalog, &before[2].0).unwrap();
 
         let config = String::from_utf8(before[0].0.clone()).unwrap();

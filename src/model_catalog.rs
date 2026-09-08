@@ -4,6 +4,34 @@ pub const MANAGED_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codex-switch-mod
 
 pub const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 
+const REASONING_LEVELS: [(&str, &str); 8] = [
+    ("none", "No reasoning"),
+    ("minimal", "Minimal reasoning"),
+    ("low", "Light reasoning"),
+    ("medium", "Balanced reasoning"),
+    ("high", "Enhanced reasoning"),
+    ("xhigh", "Extra high reasoning"),
+    ("max", "Maximum reasoning"),
+    ("ultra", "Ultra reasoning"),
+];
+
+pub fn has_selectable_capabilities(entry: &Value) -> bool {
+    entry["input_modalities"]
+        .as_array()
+        .is_some_and(|modalities| {
+            ["text", "image"]
+                .iter()
+                .all(|modality| modalities.iter().any(|value| value == modality))
+        })
+        && entry["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| {
+                REASONING_LEVELS
+                    .iter()
+                    .all(|(effort, _)| levels.iter().any(|level| level["effort"] == *effort))
+            })
+}
+
 #[derive(Debug)]
 pub struct CatalogUpdate {
     pub contents: Vec<u8>,
@@ -79,6 +107,7 @@ pub fn merge_model_catalog_with_window(
         selected["description"] = json!("User-configured relay model");
         selected["support_verbosity"] = json!(true);
     }
+    expand_selectable_capabilities(&mut selected);
     selected["context_window"] = json!(context_window);
     selected["max_context_window"] = json!(context_window);
     selected["effective_context_window_percent"] = json!(100);
@@ -241,13 +270,126 @@ fn entry(
     );
     value.insert("supports_parallel_tool_calls".to_owned(), json!(true));
     value.insert("experimental_supported_tools".to_owned(), json!([]));
-    value.insert("input_modalities".to_owned(), json!(["text"]));
-    Value::Object(value)
+    value.insert("input_modalities".to_owned(), json!(["text", "image"]));
+    let mut entry = Value::Object(value);
+    expand_selectable_capabilities(&mut entry);
+    entry
+}
+
+fn expand_selectable_capabilities(entry: &mut Value) {
+    let modalities = entry["input_modalities"].as_array_mut().unwrap();
+    for modality in ["text", "image"] {
+        if !modalities.iter().any(|value| value == modality) {
+            modalities.push(json!(modality));
+        }
+    }
+    let existing = entry["supported_reasoning_levels"].as_array().unwrap();
+    let mut levels = Vec::new();
+    for (effort, description) in REASONING_LEVELS {
+        levels.push(
+            existing
+                .iter()
+                .find(|level| level["effort"] == effort)
+                .cloned()
+                .unwrap_or_else(|| json!({"effort": effort, "description": description})),
+        );
+    }
+    // Preserve provider-specific levels and descriptions alongside the standard choices.
+    for level in existing {
+        if !levels
+            .iter()
+            .any(|candidate| candidate["effort"] == level["effort"])
+        {
+            levels.push(level.clone());
+        }
+    }
+    entry["supported_reasoning_levels"] = json!(levels);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_models_offer_images_and_every_reasoning_effort() {
+        for model in ["gpt-99-test", "glm-5.3", "deepseek-v4-flash", "qwen3.8-max"] {
+            let update = merge_model_catalog(None, None, model).unwrap().unwrap();
+            let catalog: Value = serde_json::from_slice(&update.contents).unwrap();
+            let selected = &catalog["models"][0];
+            assert_eq!(
+                selected["input_modalities"],
+                json!(["text", "image"]),
+                "{model}"
+            );
+            let efforts: Vec<_> = selected["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect();
+            assert_eq!(
+                efforts,
+                [
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+                ],
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn applying_updates_restricted_existing_and_cached_capabilities() {
+        for description in [
+            "GPT relay compatibility profile (unverified conservative limits)",
+            "User-configured relay model",
+            "Z.ai relay model",
+            "Provider metadata",
+        ] {
+            let mut model = supported_entry("gpt-99-test").unwrap();
+            model["description"] = json!(description);
+            model["input_modalities"] = json!(["text"]);
+            model["supported_reasoning_levels"] = json!([
+                {"effort": "high", "description": "Provider high"},
+                {"effort": "custom", "description": "Provider custom"}
+            ]);
+            model["base_instructions"] = json!("Keep provider instructions");
+            let bytes = serde_json::to_vec(&json!({"models": [model]})).unwrap();
+            for (existing, cached) in [
+                (Some(bytes.as_slice()), None),
+                (None, Some(bytes.as_slice())),
+            ] {
+                let update = merge_model_catalog(existing, cached, "gpt-99-test")
+                    .unwrap()
+                    .unwrap();
+                let catalog: Value = serde_json::from_slice(&update.contents).unwrap();
+                let selected = &catalog["models"][0];
+                assert!(
+                    selected["input_modalities"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!("image")),
+                    "{description}"
+                );
+                let levels = selected["supported_reasoning_levels"].as_array().unwrap();
+                for effort in [
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "custom",
+                ] {
+                    assert!(
+                        levels.iter().any(|level| level["effort"] == effort),
+                        "{description}: {effort}"
+                    );
+                }
+                assert_eq!(selected["base_instructions"], "Keep provider instructions");
+                assert_eq!(
+                    levels
+                        .iter()
+                        .find(|level| level["effort"] == "high")
+                        .unwrap()["description"],
+                    "Provider high"
+                );
+            }
+        }
+    }
 
     fn known_catalog(model: &str) -> Vec<u8> {
         let mut known = supported_entry("glm-5.3").unwrap();
