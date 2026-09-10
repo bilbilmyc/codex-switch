@@ -11,6 +11,8 @@ Codex Switch 是一个轻量的 Codex 中转站配置切换工具，支持 macOS
 3. 点击“保存”，再点击“应用到 Codex”。保存中转站只写入 Codex Switch 的本地配置；应用才会更新 Codex 配置。
 4. 启动或重新启动 Codex，开始使用已选中转站。
 
+需要从中转站切回官方时，点击侧栏底部的“恢复官方登录”。工具会先备份当前配置，再恢复内置 OpenAI 服务商与 ChatGPT 登录方式，清除当前中转站的 API key、模型、上下文及接口地址覆盖配置，并保留已有官方登录凭据、其他 Codex 设置和已保存的中转站。重启 Codex 后，如没有有效的官方会话，按 Codex 提示使用 ChatGPT 账号登录；本工具不会代为完成 OAuth 登录。之后仍可选择中转站并点击“应用到 Codex”切回，也可从备份中心恢复之前的配置。
+
 即使 `~/.codex` 尚不存在，第一次切换也会创建所需的 `config.toml` 与 `auth.json`。因此，Codex Switch 不依赖已有的 Codex 会话或登录状态。若某个 Codex Desktop 版本在界面层仍强制账号登录，这是 Desktop 自身的限制，不能由本工具绕过。
 
 ![中转站编辑器](docs/images/relay-editor.jpeg)
@@ -36,6 +38,7 @@ Codex Switch 是一个轻量的 Codex 中转站配置切换工具，支持 macOS
 - 应用时按完整模型 ID 注册模型，默认窗口为 128K；上下文配置同时写入 Codex 配置和模型目录。模型目录随配置事务、备份和恢复一并处理。
 - 导入和导出工具配置。默认导出不包含 API key，只有明确选择后才会带出密钥。
 - 应用前保存备份，保留最近 10 份，并提供恢复入口。
+- 一键恢复官方 ChatGPT 登录，自动备份原配置，并保留已保存的中转站以便再次切换。
 - 检测 Codex 相关配置被外部修改的冲突，以及正在运行的 Codex CLI 或桌面应用。
 
 本工具只支持 `auth.json` 中的 `OPENAI_API_KEY` 认证和 Codex 的 Responses wire API。它不管理 OAuth 登录、多种鉴权字段、系统代理、Codex 原生模型目录、托盘常驻、自动更新或完整的 Codex 设置。

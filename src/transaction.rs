@@ -12,8 +12,9 @@ use uuid::Uuid;
 
 use crate::codex_config::{
     CodexConfigError, ContextSettings, RelevantProjection, TOOL_PROVIDER_ID, inspect_codex_config,
-    patch_auth_json, patch_codex_config, patch_context_settings, pre_context_relevant_fingerprint,
-    relevant_fingerprint, relevant_projection,
+    patch_auth_json, patch_codex_config, patch_context_settings, patch_official_login_auth,
+    patch_official_login_config, pre_context_relevant_fingerprint, relevant_fingerprint,
+    relevant_projection,
 };
 use crate::domain::{Activation, ProfileContext, ProfileId};
 use crate::durable_fs::{self, DurableFsError};
@@ -346,6 +347,54 @@ impl TransactionManager {
         })
     }
 
+    pub fn live_revision(&self) -> Result<String, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+        Ok(snapshot_revision(&self.read_live_snapshot()?))
+    }
+
+    pub fn restore_official_login(
+        &self,
+        expected_live_revision: &str,
+    ) -> Result<ApplyOutcome, TransactionError> {
+        let _lock = durable_fs::acquire_lock(&self.paths.lock)?;
+        self.recover_locked()?;
+        let current = self.read_live_snapshot()?;
+        let actual = snapshot_revision(&current);
+        if actual != expected_live_revision {
+            return Err(TransactionError::StaleBackupPreview {
+                expected_live_revision: expected_live_revision.to_owned(),
+                actual_live_revision: actual,
+            });
+        }
+        let config = patch_official_login_config(config_text(
+            &self.paths.codex_config,
+            current.config.as_deref(),
+        )?)?;
+        let auth = patch_official_login_auth(current.auth.as_deref())?;
+        let state = ManagedState {
+            schema_version: STATE_SCHEMA_VERSION,
+            active_profile_id: None,
+            relevant_fingerprint: relevant_fingerprint(&config, auth.as_deref())?,
+        };
+        let target = Snapshot {
+            config: Some(config.into_bytes()),
+            auth,
+            state: Some(serialize_json(&state)?),
+            catalog: None,
+        };
+        let backup = self.commit_snapshot(
+            TransactionOperation::RestoreOfficialLogin,
+            &current,
+            &target,
+        )?;
+        Ok(ApplyOutcome {
+            backup,
+            state,
+            catalog_warning: None,
+        })
+    }
+
     pub fn update_context(
         &self,
         settings: ContextSettings,
@@ -648,7 +697,9 @@ impl TransactionManager {
         let expected_live_revisions = LiveRevisions::from_snapshot(current);
         let protected_backup = match &operation {
             TransactionOperation::Restore { source_backup_id } => Some(*source_backup_id),
-            TransactionOperation::Apply { .. } | TransactionOperation::UpdateContext => None,
+            TransactionOperation::Apply { .. }
+            | TransactionOperation::UpdateContext
+            | TransactionOperation::RestoreOfficialLogin => None,
         };
         self.ensure_live_revisions(&expected_live_revisions)?;
         self.prune_backups_to_limit(MAX_BACKUPS.saturating_sub(1), protected_backup)?;
@@ -1070,7 +1121,7 @@ impl TransactionManager {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Snapshot {
     config: Option<Vec<u8>>,
     auth: Option<Vec<u8>>,
@@ -1303,6 +1354,7 @@ impl TransactionJournal {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum TransactionOperation {
     Apply { profile_id: ProfileId },
+    RestoreOfficialLogin,
     UpdateContext,
     Restore { source_backup_id: BackupId },
 }
@@ -1652,6 +1704,128 @@ requires_openai_auth = true
             review_model: Some("review-model".to_owned()),
             context: None,
         }
+    }
+
+    #[test]
+    fn official_login_preserves_session_and_settings_and_can_restore_relay_backup() {
+        let (_temp, paths, manager) = fixture();
+        let relay = activation("relay-only-model");
+        manager.apply(&relay, ConflictPolicy::Reject).unwrap();
+        let before = manager.read_live_snapshot().unwrap();
+
+        let outcome = manager
+            .restore_official_login(&manager.live_revision().unwrap())
+            .unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let document = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(document["model_provider"].as_str(), Some("openai"));
+        assert_eq!(document["forced_login_method"].as_str(), Some("chatgpt"));
+        for key in [
+            "model",
+            "review_model",
+            "model_catalog_json",
+            "model_context_window",
+        ] {
+            assert!(document.get(key).is_none(), "{key}");
+        }
+        assert!(config.contains("# keep this comment"));
+        assert!(config.contains("[features]"));
+        assert!(
+            config.contains(&crate::codex_config::provider_id_for_profile(
+                relay.profile_id
+            ))
+        );
+        let auth: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.codex_auth).unwrap()).unwrap();
+        assert!(auth.get("OPENAI_API_KEY").is_none());
+        assert_eq!(auth["tokens"]["preserve"], true);
+        assert!(outcome.state.active_profile_id.is_none());
+        assert!(manager.read_live_snapshot().unwrap().catalog.is_none());
+
+        let preview = manager.preview_backup(outcome.backup.id).unwrap();
+        manager
+            .restore_backup(outcome.backup.id, &preview.live_revision)
+            .unwrap();
+        assert_eq!(manager.read_live_snapshot().unwrap(), before);
+
+        manager
+            .restore_official_login(&manager.live_revision().unwrap())
+            .unwrap();
+        manager.apply(&relay, ConflictPolicy::Reject).unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        assert!(!config.contains("forced_login_method"));
+        assert_eq!(
+            manager.load_state().unwrap().unwrap().active_profile_id,
+            Some(relay.profile_id)
+        );
+    }
+
+    #[test]
+    fn official_login_rolls_back_every_file_on_each_failed_write() {
+        for point in [
+            TestFailurePoint::Catalog,
+            TestFailurePoint::Config,
+            TestFailurePoint::Auth,
+            TestFailurePoint::State,
+        ] {
+            let (_temp, paths, manager) = fixture();
+            manager
+                .apply(&activation("relay-model"), ConflictPolicy::Reject)
+                .unwrap();
+            let before = manager.read_live_snapshot().unwrap();
+            let revision = manager.live_revision().unwrap();
+            manager.fail_once_at(point);
+            assert!(matches!(
+                manager.restore_official_login(&revision),
+                Err(TransactionError::InjectedFailure)
+            ));
+            assert_eq!(manager.read_live_snapshot().unwrap(), before);
+            assert!(!paths.journal.exists());
+        }
+    }
+
+    #[test]
+    fn official_login_rejects_changes_since_process_confirmation() {
+        let (_temp, paths, manager) = fixture();
+        let revision = manager.live_revision().unwrap();
+        durable_fs::atomic_write(&paths.codex_auth, br#"{"OPENAI_API_KEY":"external"}"#).unwrap();
+        let before = manager.read_live_snapshot().unwrap();
+        assert!(matches!(
+            manager.restore_official_login(&revision),
+            Err(TransactionError::StaleBackupPreview { .. })
+        ));
+        assert_eq!(manager.read_live_snapshot().unwrap(), before);
+        assert!(!manager.has_backup().unwrap());
+    }
+
+    #[test]
+    fn official_login_works_without_existing_config_or_auth_and_is_repeatable() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::from_home(temp.path());
+        let manager = TransactionManager::new(paths.clone());
+        manager
+            .restore_official_login(&manager.live_revision().unwrap())
+            .unwrap();
+        let first = manager.read_live_snapshot().unwrap();
+        manager
+            .restore_official_login(&manager.live_revision().unwrap())
+            .unwrap();
+        assert_eq!(manager.read_live_snapshot().unwrap(), first);
+        assert!(!paths.codex_auth.exists());
+    }
+
+    #[test]
+    fn official_login_rejects_malformed_auth_without_modifying_files() {
+        let (_temp, paths, manager) = fixture();
+        durable_fs::atomic_write(&paths.codex_auth, b"{broken").unwrap();
+        let before = manager.read_live_snapshot().unwrap();
+        assert!(
+            manager
+                .restore_official_login(&manager.live_revision().unwrap())
+                .is_err()
+        );
+        assert_eq!(manager.read_live_snapshot().unwrap(), before);
+        assert!(!manager.has_backup().unwrap());
     }
 
     fn write_pre_context_state(paths: &AppPaths, state: &ManagedState) -> ManagedState {

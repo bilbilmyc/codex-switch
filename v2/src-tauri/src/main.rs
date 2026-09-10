@@ -70,6 +70,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             commands::refresh_usage,
             commands::export_usage,
             commands::prepare_apply,
+            commands::prepare_official_login,
             commands::continue_apply,
             commands::dismiss_confirmation,
         ])

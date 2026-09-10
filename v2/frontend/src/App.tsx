@@ -14,6 +14,7 @@ import {
   History,
   Info,
   KeyRound,
+  LogIn,
   Pencil,
   Plus,
   RefreshCw,
@@ -339,6 +340,11 @@ export default function App() {
     onSuccess: (response) => void handleActionResponse(response),
     onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
   });
+  const prepareOfficialLogin = useMutation({
+    mutationFn: api.prepareOfficialLogin,
+    onSuccess: handleActionResponse,
+    onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
+  });
   const checkApplied = useMutation({
     mutationFn: (profile: ProfileSummary) => api.checkApplied(profile.id),
     onSuccess: (matches, profile) => {
@@ -488,6 +494,21 @@ export default function App() {
   async function handleActionResponse(response: ApplyResponse) {
     if (response.kind === "requires_confirmation") {
       setConfirmation(response.confirmation);
+      return;
+    }
+    if (response.kind === "official_login_restored") {
+      invalidateRouteAudit();
+      await refresh();
+      await Promise.all([refreshContext(), refreshModelCache(), refreshBackups()]);
+      setQuickModelDraft(null);
+      setConnectionChecks({});
+      setDeepValidationChecks({});
+      setNotice({
+        tone: response.warning ? "warning" : "success",
+        text: response.warning
+          ? `${response.warning}；请手动重启 Codex 并使用 ChatGPT 账号登录`
+          : "已恢复官方登录并备份原配置。请重启 Codex；如未登录，请使用 ChatGPT 账号登录。已保存的中转站仍可随时应用。",
+      });
       return;
     }
     if (response.kind === "imported_current") {
@@ -872,6 +893,7 @@ export default function App() {
     importCurrent.isPending ||
     exportProfiles.isPending ||
     prepareApply.isPending ||
+    prepareOfficialLogin.isPending ||
     checkConnection.isPending ||
     deepValidateProfile.isPending ||
     routeAuditBusy ||
@@ -1028,6 +1050,17 @@ export default function App() {
             })}
           </nav>
         )}
+        <div className="legacy-official-login">
+          <button
+            type="button"
+            disabled={bootstrap.isPending || Boolean(bootstrap.error) || busy}
+            title="备份当前配置，恢复官方 ChatGPT 登录，保留已保存的中转站"
+            onClick={() => { if (ensureWorkspaceSaved()) prepareOfficialLogin.mutate(); }}
+          >
+            <LogIn size={15} />
+            {prepareOfficialLogin.isPending ? "正在恢复官方登录…" : "恢复官方登录"}
+          </button>
+        </div>
         <footer className="legacy-sidebar-footer">
           <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) importProfiles.mutate(); }}><Upload size={14} />导入</button>
           <button type="button" disabled={profiles.length === 0 || busy} onClick={() => { if (ensureWorkspaceSaved()) setConfirmAction("export"); }}><Download size={14} />导出</button>

@@ -20,6 +20,15 @@ pub async fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> 
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub async fn prepare_official_login(state: State<'_, AppState>) -> Result<ApplyResponse, String> {
+    let service = state.service.clone();
+    tauri::async_runtime::spawn_blocking(move || service.prepare_official_login())
+        .await
+        .map_err(|_| "恢复官方登录任务已中断".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn create_profile(
     draft: ProfileDraft,

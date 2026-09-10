@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codex Switch",
   "mainBinaryName": "codex-switch",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "identifier": "com.mayc.codex-switch",
   "build": {
     "beforeDevCommand": "pnpm --dir frontend dev -- --host 127.0.0.1",

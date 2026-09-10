@@ -125,6 +125,10 @@ pub fn patch_codex_config(
     inspect_tool_provider(&document, &provider_id)?;
 
     let root = document.as_table_mut();
+    // A previous official-login switch must not prevent API-key authentication.
+    if root.get("forced_login_method").and_then(Item::as_str) == Some("chatgpt") {
+        root.remove("forced_login_method");
+    }
     set_string_preserving_decor(root, "model_provider", &provider_id)?;
     set_string_preserving_decor(root, "model", &activation.model)?;
     if let Some(review_model) = &activation.review_model {
@@ -157,6 +161,145 @@ pub fn patch_codex_config(
         contents,
         projection,
     })
+}
+
+/// Restore the built-in provider while preserving saved providers and unrelated settings.
+pub fn patch_official_login_config(raw: &str) -> Result<String, CodexConfigError> {
+    let mut document = parse_document(raw)?;
+    let root = document.as_table_mut();
+    for key in [
+        "profile",
+        "model",
+        "review_model",
+        "model_catalog_json",
+        "openai_base_url",
+        "chatgpt_base_url",
+        "chatgpt_auth_base_url",
+    ] {
+        root.remove(key);
+    }
+    remove_context_fields(root);
+    set_string_preserving_decor(root, "model_provider", "openai")?;
+    set_string_preserving_decor(root, "forced_login_method", "chatgpt")?;
+    // A user-defined `openai` entry can override the built-in official endpoint.
+    if let Some(providers) = root.get_mut("model_providers") {
+        providers
+            .as_table_like_mut()
+            .ok_or_else(|| type_error("model_providers", "a table"))?
+            .remove("openai");
+    }
+    Ok(document.to_string())
+}
+
+/// Remove relay credentials without discarding an existing ChatGPT session.
+pub fn patch_official_login_auth(raw: Option<&[u8]>) -> Result<Option<Vec<u8>>, CodexConfigError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let mut value: JsonValue = serde_json::from_slice(raw)?;
+    let object = value
+        .as_object_mut()
+        .ok_or(CodexConfigError::AuthRootNotObject)?;
+    object.remove("OPENAI_API_KEY");
+    if object.get("auth_mode").and_then(JsonValue::as_str) == Some("apikey") {
+        object.remove("auth_mode");
+    }
+    if object.is_empty() {
+        return Ok(None);
+    }
+    let mut bytes = serde_json::to_vec_pretty(&value)?;
+    bytes.push(b'\n');
+    Ok(Some(bytes))
+}
+
+#[cfg(test)]
+mod official_login_tests {
+    use super::*;
+
+    #[test]
+    fn clears_endpoint_and_profile_overrides_but_preserves_unrelated_configuration() {
+        let config = r#"# keep settings
+approval_policy = "on-request"
+profile = "relay"
+model = "custom-model"
+review_model = "custom-review"
+model_context_window = 128000
+model_auto_compact_token_limit = 100000
+model_auto_compact_token_limit_scope = "total"
+model_catalog_json = "custom.json"
+openai_base_url = "https://relay.example/v1"
+chatgpt_base_url = "https://relay.example/chatgpt"
+chatgpt_auth_base_url = "https://relay.example/auth"
+forced_login_method = "api"
+cli_auth_credentials_store = "keyring"
+
+[model_providers.openai]
+base_url = "https://relay.example/v1"
+
+[model_providers.relay]
+base_url = "https://saved.example/v1"
+
+[profiles.relay]
+model_provider = "relay"
+
+[mcp_servers.example]
+command = "example"
+"#;
+        let patched = patch_official_login_config(config).unwrap();
+        let root = patched.parse::<DocumentMut>().unwrap();
+        assert_eq!(root["model_provider"].as_str(), Some("openai"));
+        assert_eq!(root["forced_login_method"].as_str(), Some("chatgpt"));
+        for key in [
+            "profile",
+            "model",
+            "review_model",
+            "model_context_window",
+            "model_auto_compact_token_limit",
+            "model_auto_compact_token_limit_scope",
+            "model_catalog_json",
+            "openai_base_url",
+            "chatgpt_base_url",
+            "chatgpt_auth_base_url",
+        ] {
+            assert!(root.get(key).is_none(), "{key}");
+        }
+        assert!(root["model_providers"].get("openai").is_none());
+        assert_eq!(
+            root["model_providers"]["relay"]["base_url"].as_str(),
+            Some("https://saved.example/v1")
+        );
+        assert_eq!(
+            root["profiles"]["relay"]["model_provider"].as_str(),
+            Some("relay")
+        );
+        assert_eq!(
+            root["mcp_servers"]["example"]["command"].as_str(),
+            Some("example")
+        );
+        assert_eq!(root["cli_auth_credentials_store"].as_str(), Some("keyring"));
+        assert!(patched.contains("# keep settings"));
+    }
+
+    #[test]
+    fn removes_api_auth_and_preserves_oauth_tokens_and_metadata() {
+        assert_eq!(patch_official_login_auth(None).unwrap(), None);
+        assert_eq!(
+            patch_official_login_auth(Some(
+                br#"{"OPENAI_API_KEY":"relay-key","auth_mode":"apikey"}"#
+            ))
+            .unwrap(),
+            None
+        );
+        let raw = br#"{"OPENAI_API_KEY":"relay-key","auth_mode":"apikey","tokens":{"access_token":"existing","refresh_token":"refresh","id_token":"id"},"last_refresh":"2026-09-10T00:00:00Z"}"#;
+        let patched = patch_official_login_auth(Some(raw)).unwrap().unwrap();
+        let value: JsonValue = serde_json::from_slice(&patched).unwrap();
+        let original: JsonValue = serde_json::from_slice(raw).unwrap();
+        assert!(value.get("OPENAI_API_KEY").is_none());
+        assert!(value.get("auth_mode").is_none());
+        assert_eq!(value["tokens"], original["tokens"]);
+        assert_eq!(value["last_refresh"], original["last_refresh"]);
+        assert!(patch_official_login_auth(Some(b"[]")).is_err());
+    }
 }
 
 pub fn patch_model_catalog_path(
@@ -374,6 +517,12 @@ pub fn patch_auth_json(raw: Option<&[u8]>, api_key: &ApiKey) -> Result<Vec<u8>, 
     object.insert(
         "OPENAI_API_KEY".to_owned(),
         JsonValue::String(api_key.expose_secret().to_owned()),
+    );
+    // Codex gives an explicit auth_mode precedence over the stored API key.
+    // Keep OAuth tokens for a later official switch, but activate the relay key now.
+    object.insert(
+        "auth_mode".to_owned(),
+        JsonValue::String("apikey".to_owned()),
     );
 
     let mut bytes = serde_json::to_vec_pretty(&JsonValue::Object(object))?;
@@ -1010,6 +1159,22 @@ model_auto_compact_token_limit_scope = "body_after_prefix"
         assert_eq!(parsed["metadata"]["keep"], true);
         assert_eq!(parsed["OPENAI_API_KEY"], "sk-new-secret");
         assert!(!format!("{key:?}").contains("sk-new-secret"));
+    }
+
+    #[test]
+    fn official_login_round_trip_uses_relay_key_then_restores_oauth_credentials() {
+        let official = br#"{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"access_token":"existing","refresh_token":"refresh","id_token":"id"},"last_refresh":"2026-09-10T00:00:00Z"}"#;
+        let relay = patch_auth_json(Some(official), &ApiKey::new("relay-key").unwrap()).unwrap();
+        let value: JsonValue = serde_json::from_slice(&relay).unwrap();
+        assert_eq!(value["auth_mode"], "apikey");
+        assert_eq!(value["OPENAI_API_KEY"], "relay-key");
+        let restored = patch_official_login_auth(Some(&relay)).unwrap().unwrap();
+        let restored: JsonValue = serde_json::from_slice(&restored).unwrap();
+        let original: JsonValue = serde_json::from_slice(official).unwrap();
+        assert!(restored.get("OPENAI_API_KEY").is_none());
+        assert!(restored.get("auth_mode").is_none());
+        assert_eq!(restored["tokens"], original["tokens"]);
+        assert_eq!(restored["last_refresh"], original["last_refresh"]);
     }
 
     #[test]

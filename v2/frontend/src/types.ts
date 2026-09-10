@@ -207,4 +207,5 @@ export type ApplyResponse =
   | { kind: "requires_confirmation"; confirmation: Confirmation }
   | { kind: "imported_current"; profile: ProfileSummary; warning?: string }
   | { kind: "restored"; activeProfileId?: string; warning?: string }
+  | { kind: "official_login_restored"; warning?: string }
   | { kind: "context_saved"; context: ContextView; warning?: string };

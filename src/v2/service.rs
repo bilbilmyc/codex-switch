@@ -404,6 +404,9 @@ pub enum ApplyResponse {
         active_profile_id: Option<String>,
         warning: Option<String>,
     },
+    OfficialLoginRestored {
+        warning: Option<String>,
+    },
     ContextSaved {
         context: ContextView,
         warning: Option<String>,
@@ -412,6 +415,11 @@ pub enum ApplyResponse {
 
 #[derive(Debug)]
 enum PendingConfirmation {
+    OfficialLoginProcess {
+        live_revision: String,
+        desktop_executable: Option<PathBuf>,
+        desktop_only: bool,
+    },
     Process {
         activation: Activation,
         desktop_executable: Option<PathBuf>,
@@ -1037,6 +1045,87 @@ impl AppService {
             .map_err(ServiceError::filesystem)
     }
 
+    pub fn prepare_official_login(&self) -> Result<ApplyResponse, ServiceError> {
+        let _operation = self.operation_guard()?;
+        let revision = TransactionManager::new(self.paths.clone())
+            .live_revision()
+            .map_err(ServiceError::backup)?;
+        self.prepare_official_login_inner(revision)
+    }
+
+    fn prepare_official_login_inner(
+        &self,
+        live_revision: String,
+    ) -> Result<ApplyResponse, ServiceError> {
+        let report = process::detect_codex_processes();
+        if report.is_clear() {
+            return self.restore_official_login(&live_revision, false, None);
+        }
+        let desktop_only = report.has_desktop() && !report.has_command_line();
+        let token = self.remember(PendingConfirmation::OfficialLoginProcess {
+            live_revision,
+            desktop_executable: report.desktop_executable(),
+            desktop_only,
+        });
+        Ok(ApplyResponse::RequiresConfirmation {
+            confirmation: Confirmation {
+                token,
+                title: "恢复官方登录".to_owned(),
+                detail: if desktop_only {
+                    "Codex Desktop 正在运行。退出后将备份当前配置、恢复官方登录并重新打开 Codex。已保存的中转站和已有官方登录凭据会保留。".to_owned()
+                } else {
+                    "检测到正在运行的 Codex 任务。请先结束任务，再恢复官方登录；当前配置会自动备份，已保存的中转站会保留。".to_owned()
+                },
+                options: if desktop_only {
+                    vec![
+                        option(
+                            "quit_desktop_and_restore_official",
+                            "退出并恢复官方登录",
+                            ConfirmationIntent::Primary,
+                        ),
+                        option(
+                            "restore_official_anyway",
+                            "仍然恢复",
+                            ConfirmationIntent::Danger,
+                        ),
+                    ]
+                } else {
+                    vec![
+                        option("recheck_official", "重新检测", ConfirmationIntent::Primary),
+                        option(
+                            "restore_official_anyway",
+                            "仍然恢复",
+                            ConfirmationIntent::Danger,
+                        ),
+                    ]
+                },
+            },
+        })
+    }
+
+    fn restore_official_login(
+        &self,
+        live_revision: &str,
+        desktop_was_closed: bool,
+        desktop_executable: Option<PathBuf>,
+    ) -> Result<ApplyResponse, ServiceError> {
+        let result =
+            TransactionManager::new(self.paths.clone()).restore_official_login(live_revision);
+        let relaunch_error = desktop_was_closed
+            .then(|| process::relaunch_desktop(desktop_executable.as_deref()).err())
+            .flatten();
+        match result {
+            Ok(_) => Ok(ApplyResponse::OfficialLoginRestored {
+                warning: relaunch_error
+                    .map(|error| format!("已恢复官方登录，但 Codex Desktop 未能重新打开：{error}")),
+            }),
+            Err(TransactionError::StaleBackupPreview { .. }) => {
+                Err(ServiceError::StaleOfficialLogin)
+            }
+            Err(error) => Err(ServiceError::backup(error)),
+        }
+    }
+
     pub fn prepare_apply(&self, profile_id: String) -> Result<ApplyResponse, ServiceError> {
         let _operation = self.operation_guard()?;
         self.migrate_legacy_profiles_if_needed()?;
@@ -1078,6 +1167,24 @@ impl AppService {
             .ok_or_else(ServiceError::invalid_confirmation)?;
 
         match pending {
+            PendingConfirmation::OfficialLoginProcess {
+                live_revision,
+                desktop_executable,
+                desktop_only,
+            } => match choice.as_str() {
+                "quit_desktop_and_restore_official" if desktop_only => {
+                    process::quit_desktop_safely(Duration::from_secs(8))
+                        .map_err(ServiceError::process)?;
+                    self.restore_official_login(&live_revision, true, desktop_executable)
+                }
+                "recheck_official" if !desktop_only => {
+                    self.prepare_official_login_inner(live_revision)
+                }
+                "restore_official_anyway" => {
+                    self.restore_official_login(&live_revision, false, None)
+                }
+                _ => Err(ServiceError::invalid_confirmation()),
+            },
             PendingConfirmation::Process {
                 activation,
                 desktop_executable,
@@ -2653,6 +2760,8 @@ pub enum ServiceError {
     Backup,
     #[error("备份预览已过期，请重新读取后再恢复")]
     StaleBackupPreview,
+    #[error("Codex 配置在操作期间发生变化，请重新点击“恢复官方登录”。")]
+    StaleOfficialLogin,
     #[error("确认请求已失效，请重新操作")]
     InvalidConfirmation,
     #[error("内部状态暂时不可用，请重新操作")]
@@ -2807,6 +2916,50 @@ mod tests {
             checked_at_unix_ms,
             error_category: None,
         }
+    }
+
+    #[test]
+    fn official_login_keeps_saved_profiles_and_clears_active_status() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Saved relay")).unwrap();
+        let manager = TransactionManager::new(service.paths.clone());
+        let profiles = fs::read(&service.paths.profiles).unwrap();
+        let response = service
+            .restore_official_login(&manager.live_revision().unwrap(), false, None)
+            .unwrap();
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(value["kind"], "official_login_restored");
+        assert!(!value.to_string().contains("sk-v2-test"));
+        assert_eq!(fs::read(&service.paths.profiles).unwrap(), profiles);
+        let bootstrap = service.bootstrap().unwrap();
+        assert_eq!(bootstrap.profiles[0].id, created.id);
+        assert!(!bootstrap.profiles[0].is_active);
+        assert!(bootstrap.profiles[0].has_api_key);
+    }
+
+    #[test]
+    fn official_login_confirmation_can_be_cancelled_or_continued_without_process_control() {
+        let (_home, service) = service();
+        let manager = TransactionManager::new(service.paths.clone());
+        let pending = || PendingConfirmation::OfficialLoginProcess {
+            live_revision: manager.live_revision().unwrap(),
+            desktop_executable: None,
+            desktop_only: false,
+        };
+        let token = service.remember(pending());
+        service.dismiss_confirmation(token.clone()).unwrap();
+        assert!(matches!(
+            service.continue_apply(token, "restore_official_anyway".to_owned()),
+            Err(ServiceError::InvalidConfirmation)
+        ));
+        assert!(!service.paths.codex_config.exists());
+        let token = service.remember(pending());
+        assert!(matches!(
+            service
+                .continue_apply(token, "restore_official_anyway".to_owned())
+                .unwrap(),
+            ApplyResponse::OfficialLoginRestored { .. }
+        ));
     }
 
     #[test]

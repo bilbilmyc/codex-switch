@@ -284,16 +284,19 @@ export const api = {
   },
   async loadContext(profileId: string): Promise<ContextView> {
     if (isTauri) return invoke<ContextView>("load_context", { profileId });
+    const isActive = previewProfiles.some((profile) => profile.id === profileId && profile.isActive);
+    const syncState = isActive ? "synced" : "saved_for_switch";
+    const status = isActive ? "上下文配置 · 已同步到 Codex" : "上下文配置 · 应用中转站时生效";
     const saved = previewContexts.get(profileId);
-    if (saved) return saved;
+    if (saved) return { ...saved, isActive, syncState, status };
     return {
       useDefaults: false,
       windowK: "128",
       compactPercent: 80,
       summary: "128K 窗口 · 输出不限 · 压缩 80%",
-      isActive: true,
-      syncState: "synced",
-      status: "上下文配置 · 已同步到 Codex",
+      isActive,
+      syncState,
+      status,
       budget: {
         recentSession: "暂无记录",
         instructionTokens: "暂无记录",
@@ -308,6 +311,7 @@ export const api = {
   },
   async saveContext(profileId: string, draft: ContextDraft): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("save_context", { profileId, draft });
+    const isActive = previewProfiles.some((profile) => profile.id === profileId && profile.isActive);
     const response: ApplyResponse = {
       kind: "context_saved",
       context: {
@@ -315,9 +319,9 @@ export const api = {
         summary: draft.useDefaults
           ? "128K 窗口 · 输出不限 · 压缩 80%"
           : `${draft.windowK}K 窗口 · 输出不限 · 压缩 ${draft.compactPercent}%`,
-        isActive: true,
-        syncState: "synced",
-        status: "上下文配置 · 已同步到 Codex",
+        isActive,
+        syncState: isActive ? "synced" : "saved_for_switch",
+        status: isActive ? "上下文配置 · 已同步到 Codex" : "上下文配置 · 应用中转站时生效",
         budget: {
           recentSession: "暂无记录",
           instructionTokens: "暂无记录",
@@ -351,6 +355,16 @@ export const api = {
       applyState: profile.id === profileId ? "applied" : "inactive",
     }));
     return { kind: "applied", activeProfileId: profileId };
+  },
+  async prepareOfficialLogin(): Promise<ApplyResponse> {
+    if (isTauri) return invoke<ApplyResponse>("prepare_official_login");
+    previewProfiles = previewProfiles.map((profile) => ({
+      ...profile,
+      isActive: false,
+      applyState: "inactive",
+    }));
+    previewLiveProfile = { ...previewLiveProfile, id: "", isActive: false, applyState: "inactive" };
+    return { kind: "official_login_restored" };
   },
   async continueApply(token: string, choice: string): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("continue_apply", { token, choice });
