@@ -1,74 +1,79 @@
-# Codex Switch
+<div align="center">
+  <img src="assets/app-icon.svg" width="112" height="112" alt="Codex Switch 图标">
+  <h1>Codex Switch</h1>
+  <p>面向 Codex Desktop 与 Codex CLI 的中转站配置切换工具</p>
 
-Codex Switch 是一个轻量的 Codex 中转站配置切换工具，支持 macOS 与 Windows。V2 使用 Rust、Tauri 和 React 构建，V1 保留 Slint 界面。它管理中转站、API key、模型、上下文配置和本地 Token 用量，不试图替代 Codex 的完整配置界面。
+  [![Latest Release](https://img.shields.io/github/v/release/bilbilmyc/codex-switch?display_name=tag&sort=semver)](https://github.com/bilbilmyc/codex-switch/releases/latest)
+  [![CI](https://github.com/bilbilmyc/codex-switch/actions/workflows/ci.yml/badge.svg)](https://github.com/bilbilmyc/codex-switch/actions/workflows/ci.yml)
+  [![Windows](https://img.shields.io/badge/Windows-x64-0078D4?logo=windows11&logoColor=white)](https://github.com/bilbilmyc/codex-switch/releases/latest)
+  [![macOS](https://img.shields.io/badge/macOS-Universal-000000?logo=apple&logoColor=white)](https://github.com/bilbilmyc/codex-switch/releases/latest)
+  [![License](https://img.shields.io/github/license/bilbilmyc/codex-switch)](LICENSE)
+</div>
 
-**`main` 主分支为 V2（`v2/`，Tauri + React）**，后续新功能、界面演进和发布均以 V2 为目标。根目录的 Slint V1 保留为维护代码，不再随主线发布安装包。
+> [!IMPORTANT]
+> **V2 是当前唯一主线版本。** `main` 分支中的桌面应用位于 `v2/`，使用 Tauri 2、React 和 Rust 构建，后续开发、构建与发布都以 V2 为准。根目录保留的 Slint V1 界面已经冻结，仅作为历史代码保留，不再增加功能、维护界面或发布安装包。
+
+Codex Switch 用来保存多个 API Key 中转站，并在不覆盖其他 Codex 设置的前提下切换服务地址、模型与上下文参数。它同时提供配置备份、冲突检测、路由巡检、本地 Token 用量统计，以及一键恢复官方 ChatGPT 登录配置。
+
+![Codex Switch V2 概览](docs/images/v2-overview.png)
 
 ## 快速开始
 
-1. 安装 Codex Desktop 或 Codex CLI。首次使用时不需要在浏览器中完成 OpenAI 登录；若已打开 Codex 的登录页，直接退出即可。
-2. 打开 Codex Switch，点击“新建中转站”，填写中转服务的接口地址、API key 和默认模型。可选地点击“刷新模型”从服务端读取模型列表。
-3. 点击“保存”，再点击“应用到 Codex”。保存中转站只写入 Codex Switch 的本地配置；应用才会更新 Codex 配置。
-4. 启动或重新启动 Codex，开始使用已选中转站。
+1. 从 [GitHub Releases](https://github.com/bilbilmyc/codex-switch/releases/latest) 下载当前平台的最新安装包。
+2. 打开 Codex Switch，点击左上角的“新建中转站”。
+3. 填写名称、接口地址、API Key 和默认模型；保存后可检查连接或发送一次可选的最小真实请求。
+4. 点击“保存并应用”或选择已保存的中转站后执行应用。
+5. 重启 Codex Desktop 或重新打开 Codex CLI，让新配置生效。
 
-需要从中转站切回官方时，点击侧栏底部的“恢复官方登录”。工具会先备份当前配置，再恢复内置 OpenAI 服务商与 ChatGPT 登录方式，清除当前中转站的 API key、模型、上下文及接口地址覆盖配置，并保留已有官方登录凭据、其他 Codex 设置和已保存的中转站。重启 Codex 后，如没有有效的官方会话，按 Codex 提示使用 ChatGPT 账号登录；本工具不会代为完成 OAuth 登录。之后仍可选择中转站并点击“应用到 Codex”切回，也可从备份中心恢复之前的配置。
+“保存”只更新 Codex Switch 自己的数据；“应用”才会修改 `~/.codex/config.toml`、`~/.codex/auth.json` 和工具管理的模型目录。右上角的“检测生效”只读取并比对落盘配置，不会重复写入或创建备份。
 
-即使 `~/.codex` 尚不存在，第一次切换也会创建所需的 `config.toml` 与 `auth.json`。因此，Codex Switch 不依赖已有的 Codex 会话或登录状态。若某个 Codex Desktop 版本在界面层仍强制账号登录，这是 Desktop 自身的限制，不能由本工具绕过。
+需要切回官方服务时，点击侧栏中的“恢复官方登录”。Codex Switch 会先备份当前配置，再恢复 OpenAI 服务商与 ChatGPT 登录方式，同时保留已保存的中转站。重启 Codex 后，如本机没有有效官方会话，再按 Codex 提示使用 ChatGPT 账号登录即可；Codex Switch 不代为执行 OAuth 登录。
 
-![中转站编辑器](docs/images/relay-editor.jpeg)
+## 主要功能
 
-### 上下文与统计
+- 保存、搜索、复制、导入、导出和快速切换多个中转站。
+- 为每个中转站独立保存默认模型、审查模型、上下文窗口和自动压缩阈值。
+- 使用 Bearer API Key 请求标准 `GET /models` 接口；接口不可用时仍可手动填写完整模型 ID。
+- 检查单个中转站连接，或一次巡检全部中转站并保存最近结果。
+- 可选发送一次最小真实请求，验证当前凭据、路由和默认模型是否可用。
+- 应用前自动备份，保留最近 10 份，并在备份中心预览差异后恢复。
+- 检测 Codex 配置被其他工具修改的冲突，以及正在运行的 Codex CLI/Desktop 进程。
+- 从本地 Codex 会话日志统计输入、缓存、输出、调用次数、趋势和模型分布，并导出 CSV。
+- 一键恢复官方 ChatGPT 登录配置，之后仍可随时切回已保存的中转站。
 
-“上下文”页可以按中转站设置上下文窗口和自动压缩阈值。默认窗口为 128K（128,000 tokens），默认压缩阈值为 80%；填写多少就写入多少，模型目录不会额外打折或把窗口限制回内置值。恢复默认会恢复这两个数值。上下文预算是本地参考值，不限制模型输出。
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/v2-context.png" alt="Codex Switch V2 上下文设置"></td>
+    <td width="50%"><img src="docs/images/v2-usage.png" alt="Codex Switch V2 本地用量统计"></td>
+  </tr>
+  <tr>
+    <td align="center">上下文窗口与自动压缩阈值</td>
+    <td align="center">本地 Token 用量统计</td>
+  </tr>
+</table>
 
-![上下文设置](docs/images/context-settings.jpeg)
+## 安装与升级
 
-“统计”页汇总当前用户本机的 Codex 会话记录，可按时间范围查看输入、缓存、输出和调用次数，并导出 CSV。它不读取或展示会话消息正文。
+| 平台 | 安装包 | 说明 |
+| --- | --- | --- |
+| Windows | x64 NSIS `.exe` | 默认按当前用户安装，不要求为所有用户安装 |
+| macOS | Universal `.dmg` | 同时支持 Apple Silicon 与 Intel |
 
-![Token 用量统计](docs/images/usage-statistics.jpeg)
+V2 沿用原有的产品名 `Codex Switch`、应用标识 `com.mayc.codex-switch` 和可执行文件名 `codex-switch`。从 V1 升级时，Windows 安装器会沿用原安装目录；macOS 可将新版 `Codex Switch.app` 拖入“应用程序”并确认替换。升级前请先退出旧版应用。
 
-## 功能范围
+V1 与 V2 共用 `~/.codex-switch` 和 `~/.codex`，正常升级不会删除中转站、密钥或备份。早期单独安装的 `Codex Switch V2` alpha 包使用过不同的安装身份，应先卸载程序本体再安装当前版本，但不要删除上述共享配置目录。
 
-- 保存多个中转站配置，并通过显式的“应用”操作切换当前配置。
-- 从当前 `~/.codex/config.toml` 和 `~/.codex/auth.json` 导入可兼容的中转站。
-- 每个中转站分别记住默认模型和可选的 `review_model`。
-- 每个中转站可分别设置上下文窗口与自动压缩阈值；切换时一并应用。
-- 从本机 Codex 会话日志汇总输入、缓存输入、缓存写入、输出、推理输出、调用次数、近 14 日趋势和模型分布，并支持 CSV 导出。
-- 使用 Bearer API key 请求中转站的标准 `GET /models` 接口，缓存模型列表；接口不可用时仍可手动填写模型 ID。
-- 应用时按完整模型 ID 注册模型，默认窗口为 128K；上下文配置同时写入 Codex 配置和模型目录。模型目录随配置事务、备份和恢复一并处理。
-- 导入和导出工具配置。默认导出不包含 API key，只有明确选择后才会带出密钥。
-- 应用前保存备份，保留最近 10 份，并提供恢复入口。
-- 一键恢复官方 ChatGPT 登录，自动备份原配置，并保留已保存的中转站以便再次切换。
-- 检测 Codex 相关配置被外部修改的冲突，以及正在运行的 Codex CLI 或桌面应用。
+当前公开构建没有 Apple Developer ID 公证，Windows SmartScreen 或 macOS Gatekeeper 可能显示来源提示。请只使用本仓库 Release 或自行构建的安装包。
 
-本工具只支持 `auth.json` 中的 `OPENAI_API_KEY` 认证和 Codex 的 Responses wire API。它不管理 OAuth 登录、多种鉴权字段、系统代理、Codex 原生模型目录、托盘常驻、自动更新或完整的 Codex 设置。
+## 写入范围
 
-## 数据与隐私
-
-工具的数据统一保存在用户家目录的隐藏目录 `~/.codex-switch`：
-
-| 路径 | 内容 |
-| --- | --- |
-| `~/.codex-switch/profiles.toml` | 中转站、模型、上下文配置和 API key |
-| `~/.codex-switch/state.json` | 当前应用状态与冲突检测信息 |
-| `~/.codex-switch/model-cache/` | 各中转站最近获取的模型列表 |
-| `~/.codex-switch/usage.sqlite3` | 本地 Token 用量索引、统计缓存和已确认的旧版归属时间窗 |
-| `~/.codex-switch/backups/` | 应用配置前生成的 Codex 配置备份 |
-
-Token 统计首次读取时会扫描 `~/.codex/sessions/` 与 `~/.codex/archived_sessions/` 下的 JSONL 事件，并把已计算的报表按中转站、时间范围、当地统计窗口和旧版归属时间窗缓存到 `usage.sqlite3`。后续来源文件和统计窗口未变化时直接读取本地索引；文件变化、缓存内容损坏、SQLite 索引损坏或删除数据库时会自动重扫并重建。扫描期间遇到暂时不可读的来源时，该次不完整报表不会写入缓存。数据库只保存来源文件的路径、大小、修改时间、统计结果，以及旧版记录的 profile UUID 和时间边界；不保存消息正文、原始日志行、完整配置或 API key。损坏记录、超大单行和符号链接会被跳过。
-
-这些文件不会额外加密，`profiles.toml` 和备份中的 API key 都是明文。macOS/Unix 上工具会尽量将目录和文件权限分别限制为 `0700` 和 `0600`；Windows 上仍应依赖当前用户账户与磁盘权限保护家目录。不要把 `~/.codex-switch` 提交到 Git、上传网盘或发送给其他人。
-
-## 写入 Codex 的范围
-
-应用中转站时，工具对 `~/.codex/config.toml` 做保留格式的局部修改，只维护以下字段：
+应用中转站时，Codex Switch 对 `~/.codex/config.toml` 做保留格式的局部修改，主要维护以下内容：
 
 ```toml
 model_provider = "codex_switch_a1b2c3d4e5f6478899aabbccddeeff00"
 model = "中转站默认模型"
-# 启用审查模型时才存在：
+# 可选：
 review_model = "中转站审查模型"
-# 显式配置上下文时才存在：
 model_context_window = 272000
 model_auto_compact_token_limit = 217600
 model_auto_compact_token_limit_scope = "total"
@@ -80,111 +85,100 @@ wire_api = "responses"
 requires_openai_auth = true
 ```
 
-同时只更新 `~/.codex/auth.json` 的 `OPENAI_API_KEY`。其他 Codex 配置、其他 provider 和 `auth.json` 中的其他字段会保留。禁用审查模型时，工具会移除自己管理的顶层 `review_model`；上下文恢复默认时会移除上述三个上下文字段，让 Codex 使用模型默认值。
+工具只更新 `~/.codex/auth.json` 中的 `OPENAI_API_KEY`，并保留其他字段、其他 provider 和未受管理的 Codex 设置。上下文恢复默认时会移除工具管理的上下文字段，让 Codex 回到模型默认值。
 
-Codex 配置没有生成输出 Token 上限字段，因此本工具不会写入或人为限制最大输出 Token。实际响应仍受所选模型和中转服务自身能力约束。
+选择模型并应用时，工具会为完整模型 ID 生成或更新托管目录：
 
-模型刷新会把中转站的 `base_url` 规范化后请求其 `/models` 路径，并发送 `Authorization: Bearer <OPENAI_API_KEY>`。工具不会自动轮询；刷新由用户触发，成功结果缓存在本地。
+```text
+~/.codex/model-catalogs/codex-switch-models.json
+```
 
-每个中转站使用稳定且独立的 `model_provider` ID，统计页按当前选中的中转站筛选本地会话日志。输入和输出趋势以两条折线显示，并各自按区间峰值缩放，便于观察变化；统计卡片显示所选日期的单日输入、缓存输入、输出和调用数，鼠标移入图表会同步切换到对应日期。模型表与单独的“近 7 天/近 30 天总计”区域明确显示所选范围的汇总，避免把周期总数误读为单日用量。升级前由共享 `codex_switch` ID 写入的历史日志会根据本机已校验的切换备份和会话配置段保守恢复归属；首个可验证切换点之前、损坏快照附近或无法证明归属的记录会显示为“迁移前共享调用未归属”，不会计入任何中转站。重新切换一次中转站后，新会话会开始按独立 ID 精确记录。标准 `/models` 响应也不包含中转站费率，因此界面不估算费用，避免把公开模型价格误当成中转站账单。上下文预算中的指令 Token 按文件字节数近似估算，属于本地参考值。
-
-### 新模型与能力目录
-
-“刷新模型”只获取服务商模型 ID，不验证调用能力，也不直接修改 Codex 的目录。选择模型并应用时，Codex Switch 按以下顺序解析能力信息：
-
-1. 优先保留当前 `model_catalog_json` 中完整 ID 精确匹配的非上下文能力信息，包括输入类型和指令。
-2. 如果缺少能力信息，读取本机 `~/.codex/models_cache.json` 中精确匹配的条目。不会拿相似型号的参数套用，也不会把只含 ID 的响应当作能力目录。损坏或不可读的可选缓存会被忽略；损坏的当前目录会阻止应用，避免覆盖原配置。
-3. 没有精确能力信息时，按用户选择的完整模型 ID 创建条目，不按名称拒绝注册，不设置“兼容模式”。
-
-当前选择模型的 `context_window` 和 `max_context_window` 始终写入设定值，`effective_context_window_percent` 为 100；未设置窗口时使用 128,000。应用时为新旧条目开放文本与图片输入，以及 `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra` 思考强度；已有额外输入类型、自定义档位及描述保留。新建条目启用输出详细程度参数。这里声明的是可选配置，不替服务商保证实际能力；服务商不支持的输入或档位仍可能被拒绝，不会在本工具内偷偷降档。真实请求验证仅检查一次最小请求，不覆盖全部图片输入或思考档位。
-
-生成目录时保留当前目录已有条目；若没有自定义目录，则保留缓存中的可用条目。只注册当前选中的型号，不批量注册服务商返回的所有 ID。结果写入 `~/.codex/model-catalogs/codex-switch-models.json`，外部目录和缓存原文件不修改。托管目录与 `config.toml`、`auth.json` 同步备份和恢复。
-
-使用流程为：**选择模型和上下文 → 应用配置 → 重启 Codex**。已应用后，右上角显示“检测生效”，只读取并比较配置与模型目录，不重复写文件、不创建新备份。检测通过表示落盘配置与设定一致，不代表旧进程已经重新加载。真实请求验证是独立的可选操作，不是应用的前置条件。
+生成时优先保留当前目录或 `~/.codex/models_cache.json` 中精确匹配的能力信息，不会把相似型号的参数套到新模型上。托管目录会和 `config.toml`、`auth.json` 一起备份、回滚和恢复。
 
 ## 切换安全
 
-中转站编辑器中的“保存”只更新 `~/.codex-switch/profiles.toml`；“应用”会修改 `~/.codex/config.toml` 和 `~/.codex/auth.json`。在当前已应用的中转站上保存上下文时，工具会通过同样的备份、校验和回滚流程立即同步 `config.toml`，让新会话生效；未应用中转站的上下文会在下次切换时写入。
+每次应用都会依次执行校验、备份、原子写入和结果检查；写入失败时会尝试回滚，下次启动也会检查未完成事务。工具只对自己管理的字段做冲突检测，发现外部修改时会要求选择导入当前值、覆盖或取消。
 
-每次应用都会先校验配置、生成备份，再原子替换目标文件。工具会优先使用 Codex Desktop 随附的 Codex 可执行文件，也会检查常见安装路径与 `PATH`；若未找到可执行校验器，则只执行内置结构校验，并在界面中明确显示降级警告。Codex++、cc-switch 等外部工具写入相对 `model_catalog_json` 时，校验过程会从真实 Codex 目录只读复制对应模型目录文件到隔离目录，不修改或持久保存原文件。工具管理的字段会接受严格结构校验，但调用 Codex 校验时与正常启动一样容忍外部工具留下的未知字段。发生写入失败时会尝试回滚；下次启动也会检查未完成事务。工具只对它管理的相关字段做外部变更检测，出现冲突时应在界面中选择导入当前值、覆盖或取消，而不是继续盲写。上下文单独同步发生冲突时，“保留外部并同步”只更新上下文字段，保留工具外刚修改的模型、认证和其他配置。
+Codex Desktop 或 CLI 仍在运行时，旧配置可能已经加载到内存，也可能在退出时再次写入文件。Codex Switch 会提示风险，并在支持的平台上尝试正常退出和重新启动桌面应用。请勿在重要 Codex 任务执行期间强制切换。
 
-如果 Codex CLI 或 Codex/ChatGPT 桌面应用仍在运行，它可能已经把旧配置加载到内存，也可能在退出时再次写文件。工具会先给出风险提示，并在支持的平台上请求桌面应用正常退出和重新启动；无法可靠识别或关闭时，需要用户明确确认。不要在正在执行的重要 Codex 任务中强制切换。
+备份恢复会覆盖对应的 Codex 配置文件；删除 Codex Switch 中保存的中转站则不会自动修改当前已应用的 Codex 配置。
 
-备份只用于恢复 Codex 的 `config.toml` 和 `auth.json`，恢复操作同样会覆盖当前对应文件。删除一个工具配置不会自动修改当前已应用的 Codex 配置。
+## 数据与隐私
 
-## 安装
+Codex Switch 的本地数据统一保存在 `~/.codex-switch`：
 
-发布产物按平台生成：
+| 路径 | 内容 |
+| --- | --- |
+| `profiles.toml` | 中转站、模型、上下文配置和 API Key |
+| `state.json` | 当前应用状态与冲突检测信息 |
+| `model-cache/` | 各中转站最近获取的模型列表 |
+| `usage.sqlite3` | 本地 Token 用量索引与统计缓存 |
+| `backups/` | 应用或恢复前创建的 Codex 配置备份 |
+| `logs/` | 启动、校验、切换、冲突、回滚与恢复日志 |
 
-- macOS：通用版 `Codex Switch.app` 和 `_universal.dmg`，同时包含 Apple Silicon（arm64）与 Intel（x86_64）。
-- Windows：x64 NSIS `.exe` 安装器，默认安装到当前用户范围，不要求为所有用户安装。
+用量统计只扫描当前用户的 `~/.codex/sessions/` 和 `~/.codex/archived_sessions/`。数据库保存来源文件元数据和聚合统计，不保存消息正文、原始日志行、完整配置或 API Key；日志也不会记录 API Key 或 `auth.json` 内容。
 
-V2 沿用 V1 的应用名 `Codex Switch`、应用标识 `com.mayc.codex-switch` 和可执行文件名 `codex-switch`。Windows 安装器会识别 V1，默认使用原安装目录进行升级，不再作为独立的 `Codex Switch V2` 安装；macOS 将新版 `Codex Switch.app` 拖入原“应用程序”目录并确认替换即可。升级前退出旧版应用。两版共享 `~/.codex-switch` 和 `~/.codex`，升级不清理这些目录，中转站、密钥和备份继续使用。
-
-早期独立安装的 `Codex Switch V2` alpha 包使用不同的安装身份，不在 V1 覆盖升级链中；已安装该测试包的用户应退出它并卸载程序本体，保留上述共享配置目录，再安装主线包。
-
-macOS 发布包在最终写入资源后使用临时签名校验其完整性，但没有 Apple Developer ID 证书。Gatekeeper 或 Windows SmartScreen 仍可能显示来源提示；请只运行自己构建或来自可信发布渠道的产物。macOS DMG 不要求接受单独的安装条款；将 `Codex Switch.app` 拖到“应用程序”后，弹出安装磁盘，再从“应用程序”启动即可。
-
-面向组织外部发布 macOS 安装包时，应使用 Apple Developer ID 签名并向 Apple 公证 DMG。当前公开 Release 没有配置这类凭据，适合已确认来源的内部使用，不应宣称为已公证发行版。
+本地文件不会额外加密，`profiles.toml` 与备份中的 API Key 是明文。macOS/Unix 上工具会尽量将目录和文件权限限制为 `0700` 和 `0600`；Windows 上依赖当前用户账户与磁盘权限。请勿把 `~/.codex-switch` 提交到 Git、同步到公开网盘或发送给他人。
 
 ## 本地开发
 
-### 版本维护约定
+需要 Rust 1.92 或更高版本、Node.js、pnpm、Tauri 2 CLI，以及当前平台的 Rust 原生构建工具链。
 
-- V2 是主线开发版本，新功能和界面演进优先在 V2 实现。
-- V1（根目录 Slint 应用）只做 bug 修复，不增加新功能或进行界面重构。
-- 修复问题时必须检查 V2（`v2/` 下的 Tauri + React 应用）是否同样受影响；共有问题需要同时修复并验证两版。
-- 共有逻辑优先在共享后端修复，同时检查两版界面的调用和错误提示，不能仅凭共享依赖就认定 V2 已验证。
-- V2 在 `main` 开发和发布，并沿用 V1 的安装身份进行覆盖升级；不要更改产品名、发布者、应用标识、可执行文件名或 Windows 安装范围，否则会中断升级链。
-
-需要 Rust 1.92 或更高版本，以及当前平台的 Rust 原生构建工具链。V2 还需要 Node.js、pnpm 和 Tauri 2 CLI。
-
-V2 主线开发（在仓库根目录执行）：
+在仓库根目录安装前端依赖：
 
 ```bash
 pnpm --dir v2/frontend install --frozen-lockfile
+```
+
+启动 V2：
+
+```bash
 cd v2/src-tauri
 cargo tauri dev
 ```
 
-V1 维护开发（在仓库根目录执行）：
+运行检查：
 
 ```bash
-cargo run
 cargo test
-cargo build --release
+pnpm --dir v2/frontend test
+pnpm --dir v2/frontend build
 ```
 
-应用只读写当前用户家目录下的 `~/.codex` 和 `~/.codex-switch`。发生问题时可查看 `~/.codex-switch/logs/codex-switch-YYYY-MM-DD.log`；日志记录启动、校验、切换、冲突、回滚和恢复结果，但不会记录 API Key 或 `auth.json` 内容。开发测试前建议先备份真实的 `~/.codex/config.toml` 与 `~/.codex/auth.json`。
+开发与测试会读写当前用户的 `~/.codex` 和 `~/.codex-switch`。使用真实配置测试前，请先备份 `~/.codex/config.toml` 与 `~/.codex/auth.json`。
 
-## 打包
-
-### V2 主线
+## 构建 V2
 
 ```bash
 cd v2/src-tauri
 cargo tauri build
 ```
 
-Windows 仅生成 NSIS 安装器时使用 `cargo tauri build --bundles nsis`，产物位于 `v2/src-tauri/target/release/bundle/nsis/`；macOS 使用 `cargo tauri build --bundles dmg`。应用名统一为 **Codex Switch**，V2 安装包用于升级 V1。Tauri 的前端钩子以 `v2/` 为工作目录，因此使用 `pnpm --dir frontend`。开发时两版仍共享配置及生命周期锁，不能同时运行。
-
-发布用的 macOS 通用包须在 macOS 上构建：先执行 `rustup target add aarch64-apple-darwin x86_64-apple-darwin`，再在 `v2/src-tauri` 执行 `cargo tauri build --target universal-apple-darwin --bundles app,dmg`，DMG 位于 `target/universal-apple-darwin/release/bundle/dmg/`，保留的 `.app` 位于相邻的 `macos/` 目录，供架构与签名校验使用。应用使用临时签名，不包含 Apple 公证。
-
-### V1 历史维护构建
-
-仅用于维护验证，不上传到主线 Release；安装旧包会替换当前 V2，不应将其作为主线升级包分发。
-
-打包使用 `cargo-packager` 0.11.8：
+Windows 只生成 NSIS 安装器：
 
 ```bash
-cargo install cargo-packager --version 0.11.8 --locked
-cargo packager --release
+cargo tauri build --bundles nsis
 ```
 
-原生安装包应在对应目标系统上构建，默认输出到 `target/release/`。配置中的 `formats = ["default"]` 在 macOS 上生成 `.app` 与 `.dmg`，在 Windows 上生成 NSIS 安装器。Windows 安装器使用 `currentUser` 模式。macOS 打包后还需要运行 `scripts/normalize_macos_dmg.sh target/release/*.dmg`，以清除安装盘的应用图标，避免 Finder 在卷图标上叠加状态标识。
+macOS 通用包需要在 macOS 上构建：
 
-GitHub Actions 在 `main` 执行共享后端和 V2 检查。手动运行工作流会构建 V2 macOS 通用 `.dmg` 与 Windows x64 NSIS `.exe` 并保留构件；推送与 `v2/src-tauri/Cargo.toml` 版本一致的正式 `v<version>` tag 时，只有两端都构建成功并通过产物检查后，才一起发布为最新 Release，不再发布 V1 安装包。Windows 检查程序和安装器的 GUI 子系统；macOS 检查双架构、签名和 DMG 完整性。V2 的 Cargo、Tauri 和前端版本必须一致，根目录 Cargo 版本仅属于共享库及 V1。
+```bash
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cd v2/src-tauri
+cargo tauri build --target universal-apple-darwin --bundles app,dmg
+```
+
+GitHub Actions 会在 `main` 上运行共享 Rust 后端和 V2 前端检查。只有推送与 `v2/src-tauri/Cargo.toml` 版本一致的正式 `v<version>` tag 时，发布工作流才会创建 Release；普通代码推送不会发布安装包。
+
+## V1 冻结说明
+
+根目录的 Slint 应用是历史 V1 界面。自 V2 成为主线后：
+
+- V1 不再增加功能、调整界面或发布安装包。
+- V1 不作为新问题的修复目标，也不再要求与 V2 同步实现。
+- 根目录 Rust crate 仍包含 V2 复用的共享后端，因此不能简单删除；涉及共享逻辑的修改仍需运行 Rust 测试。
+- 所有用户文档、截图、构建说明和 GitHub Release 均以 V2 为准。
 
 ## 许可
 
-Codex Switch 使用 [MIT License](LICENSE)。[简体中文译文](LICENSE.zh-CN.txt) 用于阅读，英文文本为权威版本。Slint 和 Lucide 图标的许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。应用顶部可访问的“关于”界面包含 Slint 的 `AboutSlint` 组件，用于满足所选 Slint royalty-free 许可的署名条件。
+Codex Switch 使用 [MIT License](LICENSE)。[简体中文译文](LICENSE.zh-CN.txt) 仅供阅读，英文文本为权威版本。Lucide 图标与历史 V1 使用的 Slint 许可及归属说明见 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。
