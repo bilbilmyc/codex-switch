@@ -12,9 +12,9 @@ import {
   Cpu,
   Download,
   History,
-  Info,
   KeyRound,
   LogIn,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
@@ -129,6 +129,8 @@ export default function App() {
   const deepValidationInFlight = useRef(false);
 
   const profiles = bootstrap.data?.profiles ?? [];
+  const activeProfile = profiles.find((profile) => profile.isActive);
+  const officialLoginActive = bootstrap.data?.officialLoginActive ?? false;
   const selectedProfile = useMemo(
     () => profiles.find((profile) => profile.id === selectedId) ?? profiles[0],
     [profiles, selectedId],
@@ -167,13 +169,7 @@ export default function App() {
   const usage = useQuery({
     queryKey: ["usage", selectedProfile?.id, usagePeriod],
     queryFn: () => api.refreshUsage(selectedProfile!.id, usagePeriod),
-    enabled: Boolean(selectedProfile),
-    refetchInterval: 900_000,
-  });
-  const todayUsage = useQuery({
-    queryKey: ["usage", selectedProfile?.id, "today"],
-    queryFn: () => api.refreshUsage(selectedProfile!.id, "today"),
-    enabled: Boolean(selectedProfile),
+    enabled: Boolean(selectedProfile) && page === "usage",
     refetchInterval: 900_000,
   });
   const routeAuditResults = useQuery({
@@ -229,6 +225,8 @@ export default function App() {
   const refresh = async () => queryClient.invalidateQueries({ queryKey: ["bootstrap"] });
   const refreshContext = async () =>
     queryClient.invalidateQueries({ queryKey: ["context", selectedProfile?.id] });
+  const refreshRouteContext = async () =>
+    queryClient.resetQueries({ queryKey: ["context"] });
   const refreshModelCache = async (profileId?: string) =>
     queryClient.invalidateQueries({ queryKey: ["model-cache", profileId ?? selectedProfile?.id] });
   const refreshBackups = async () => {
@@ -337,7 +335,7 @@ export default function App() {
   });
   const prepareApply = useMutation({
     mutationFn: api.prepareApply,
-    onSuccess: (response) => void handleActionResponse(response),
+    onSuccess: handleActionResponse,
     onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
   });
   const prepareOfficialLogin = useMutation({
@@ -453,7 +451,7 @@ export default function App() {
     mutationFn: (values: { token: string; choice: string }) => api.continueApply(values.token, values.choice),
     onSuccess: (response) => {
       setConfirmation(undefined);
-      void handleActionResponse(response);
+      return handleActionResponse(response);
     },
     onError: (error) => {
       const backupRestoreFailed = pendingBackupRestoreAt.current !== undefined;
@@ -469,14 +467,14 @@ export default function App() {
     mutationFn: (draft: ContextDraft) => api.saveContext(selectedProfile!.id, draft),
     onSuccess: (response) => {
       if (response.kind === "requires_confirmation") setContextDirty(false);
-      void handleActionResponse(response);
+      return handleActionResponse(response);
     },
     onError: (error) => { setCloseAfterContextSave(false); setDeferredSelectionId(undefined); setNotice({ tone: "error", text: messageFor(error) }); },
   });
   const prepareBackupRestore = useMutation({
     mutationFn: (values: { backupId: string; liveRevision: string }) =>
       api.prepareBackupRestore(values.backupId, values.liveRevision),
-    onSuccess: (response) => void handleActionResponse(response),
+    onSuccess: handleActionResponse,
     onError: (error) => setNotice({ tone: "error", text: messageFor(error) }),
   });
   const exportUsage = useMutation({
@@ -499,15 +497,15 @@ export default function App() {
     if (response.kind === "official_login_restored") {
       invalidateRouteAudit();
       await refresh();
-      await Promise.all([refreshContext(), refreshModelCache(), refreshBackups()]);
+      await Promise.all([refreshRouteContext(), refreshModelCache(), refreshBackups()]);
       setQuickModelDraft(null);
       setConnectionChecks({});
       setDeepValidationChecks({});
       setNotice({
-        tone: response.warning ? "warning" : "success",
+        tone: response.warning || response.restartRequired ? "warning" : "success",
         text: response.warning
-          ? `${response.warning}；请手动重启 Codex 并使用 ChatGPT 账号登录`
-          : "已恢复官方登录并备份原配置。请重启 Codex；如未登录，请使用 ChatGPT 账号登录。已保存的中转站仍可随时应用。",
+          ? `${response.warning}；请重新打开 Codex`
+          : `已切换到官方登录。${response.restartRequired ? "请重启 Codex，让旧的登录状态退出。" : ""}如未登录，请在 Codex 中使用 ChatGPT 账号登录。`,
       });
       return;
     }
@@ -536,7 +534,7 @@ export default function App() {
       setBackupCenterOpen(false);
       invalidateRouteAudit();
       await refresh();
-      await refreshContext();
+      await refreshRouteContext();
       await refreshModelCache();
       await refreshBackups();
       setQuickModelDraft(null);
@@ -567,15 +565,15 @@ export default function App() {
       return;
     }
     await refresh();
-    await refreshContext();
+    await refreshRouteContext();
     await refreshModelCache();
     setSelectedId(response.activeProfileId);
     setQuickModelDraft(null);
     setNotice({
-      tone: response.warning ? "warning" : "success",
+      tone: response.warning || response.restartRequired ? "warning" : "success",
       text: response.warning
-        ? `${response.warning}；重启 Codex 后使用新配置`
-        : "配置已应用，重启 Codex 后使用",
+        ? `${response.warning}${response.restartRequired ? "；请重启 Codex 后使用" : ""}`
+        : response.restartRequired ? "已切换中转站，请重启 Codex 后使用" : "已切换中转站，原配置已自动备份",
     });
   }
 
@@ -601,12 +599,29 @@ export default function App() {
       saveQuickModel(true);
       return;
     }
+    if (profileConfigurationIssue(selectedProfile)) {
+      openProfileEditor("edit");
+      return;
+    }
     if (!ensureContextSaved()) return;
     if (selectedProfile.applyState === "applied" && context.data?.syncState === "synced") {
       checkApplied.mutate(selectedProfile);
       return;
     }
     prepareApply.mutate(selectedProfile.id);
+  }
+
+  function switchProfile(id: string) {
+    if (busy) return;
+    if (id === selectedProfile?.id) {
+      applySelectedProfile();
+      return;
+    }
+    if (!ensureWorkspaceSaved()) return;
+    setSelectedId(id);
+    setQuickModelDraft(null);
+    setPage("relay");
+    prepareApply.mutate(id);
   }
 
   function saveQuickModel(applyAfter: boolean) {
@@ -985,6 +1000,19 @@ export default function App() {
             <Plus size={17} />
           </button>
         </header>
+        <div className={`legacy-official-login ${officialLoginActive ? "current" : ""}`}>
+          <button
+            type="button"
+            disabled={bootstrap.isPending || Boolean(bootstrap.error) || busy || officialLoginActive}
+            aria-label={officialLoginActive ? "官方登录为当前配置" : "切换到官方登录"}
+            title="切换到 ChatGPT 官方登录，当前配置会自动备份"
+            onClick={() => { if (ensureWorkspaceSaved()) prepareOfficialLogin.mutate(); }}
+          >
+            <LogIn size={17} />
+            <span><strong>ChatGPT 官方</strong><small>使用 ChatGPT 账号登录</small></span>
+            <em>{prepareOfficialLogin.isPending ? "切换中" : officialLoginActive ? "当前" : "切换"}</em>
+          </button>
+        </div>
         <div className="legacy-sidebar-search">
           <Search size={15} />
           <input
@@ -993,9 +1021,6 @@ export default function App() {
             value={profileQuery}
             onChange={(event) => setProfileQuery(event.target.value)}
           />
-          <button type="button" title="巡检全部中转站" aria-label="巡检全部中转站" disabled={profiles.length === 0 || (busy && !routeAuditBusy)} onClick={openRouteAudit}>
-            {routeAuditBusy ? <RefreshCw className="spin" size={15} /> : <Activity size={15} />}
-          </button>
           <button type="button" title="快速切换" aria-label="快速切换" onClick={requestQuickSwitcher}>
             <Route size={15} />
           </button>
@@ -1033,44 +1058,54 @@ export default function App() {
                     : connection?.state === "error"
                       ? { label: "失败", tone: "error" }
                       : { label: applyState.badge, tone: applyState.tone };
-              return <button
+              return <div
                 className={`legacy-profile-row ${selectedProfile?.id === profile.id ? "selected" : ""}`}
-                type="button"
                 key={profile.id}
-                disabled={busy}
-                onClick={() => selectProfile(profile.id)}
               >
-                <span className={`legacy-profile-health ${profileHealthClass(profile, connection)}`} />
-                <span className="legacy-profile-copy">
-                  <strong>{profile.name}</strong>
-                  <small>{profile.model || "未设置模型"}</small>
-                </span>
-                <span className={`legacy-active-label ${badge.tone}`}>{badge.label}</span>
-              </button>;
+                <button className="legacy-profile-select" type="button" disabled={busy} aria-label={`查看 ${profile.name}`} onClick={() => selectProfile(profile.id)}>
+                  <span className={`legacy-profile-health ${profileHealthClass(profile, connection)}`} />
+                  <span className="legacy-profile-copy">
+                    <strong>{profile.name}</strong>
+                    <small>{profile.model || "未设置模型"}</small>
+                  </span>
+                  {badge.label && profile.applyState !== "applied" && <span className={`legacy-active-label ${badge.tone}`}>{badge.label}</span>}
+                </button>
+                <button
+                  className={`legacy-row-switch ${profile.applyState === "applied" ? "current" : ""}`}
+                  type="button"
+                  disabled={busy || profile.applyState === "applied" || Boolean(profileConfigurationIssue(profile))}
+                  aria-label={profile.applyState === "applied" ? `${profile.name} 为当前配置` : `切换到 ${profile.name}`}
+                  title={profileConfigurationIssue(profile) ?? undefined}
+                  onClick={() => switchProfile(profile.id)}
+                >{profile.applyState === "applied" ? <><Check size={12} />当前</> : "切换"}</button>
+              </div>;
             })}
           </nav>
         )}
-        <div className="legacy-official-login">
-          <button
-            type="button"
-            disabled={bootstrap.isPending || Boolean(bootstrap.error) || busy}
-            title="备份当前配置，恢复官方 ChatGPT 登录，保留已保存的中转站"
-            onClick={() => { if (ensureWorkspaceSaved()) prepareOfficialLogin.mutate(); }}
-          >
-            <LogIn size={15} />
-            {prepareOfficialLogin.isPending ? "正在恢复官方登录…" : "恢复官方登录"}
-          </button>
-        </div>
         <footer className="legacy-sidebar-footer">
-          <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) importProfiles.mutate(); }}><Upload size={14} />导入</button>
-          <button type="button" disabled={profiles.length === 0 || busy} onClick={() => { if (ensureWorkspaceSaved()) setConfirmAction("export"); }}><Download size={14} />导出</button>
-          <button type="button" title="打开备份中心" disabled={bootstrap.isPending || busy} onClick={() => { if (!ensureWorkspaceSaved()) return; prepareBackupRestore.reset(); setBackupCenterOpen(true); }}><History size={14} />恢复</button>
-          <span />
-          <button type="button" title="关于 Codex Switch" aria-label="关于 Codex Switch" onClick={() => setNotice({ tone: "success", text: "Codex Switch" })}><Info size={16} /></button>
+          <span>切换前自动备份</span>
+          <details className="legacy-more-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }} onClick={(event) => { if ((event.target as Element).closest("button")) event.currentTarget.open = false; }}>
+            <summary aria-label="更多功能"><MoreHorizontal size={17} />更多</summary>
+            <div>
+              <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) importCurrent.mutate(); }}><Download size={14} />从 Codex 导入中转站</button>
+              <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) importProfiles.mutate(); }}><Upload size={14} />从文件导入</button>
+              <button type="button" disabled={profiles.length === 0 || busy} onClick={() => { if (ensureWorkspaceSaved()) setConfirmAction("export"); }}><Download size={14} />导出中转站</button>
+              <button type="button" disabled={bootstrap.isPending || busy} onClick={() => { if (!ensureWorkspaceSaved()) return; prepareBackupRestore.reset(); setBackupCenterOpen(true); }}><History size={14} />备份与恢复</button>
+              <button type="button" disabled={profiles.length === 0 || (busy && !routeAuditBusy)} onClick={openRouteAudit}><Activity size={14} />检查全部中转站</button>
+              <button type="button" disabled={!selectedProfile || busy} onClick={() => { if (selectedProfile) checkApplied.mutate(selectedProfile); }}><CircleCheck size={14} />检查当前配置</button>
+              {officialLoginActive && <button type="button" disabled={busy} onClick={() => { if (ensureWorkspaceSaved()) prepareOfficialLogin.mutate(); }}><LogIn size={14} />重新设置官方登录</button>}
+            </div>
+          </details>
         </footer>
       </aside>
 
-      <section className="legacy-main">
+      <section className={`legacy-main ${selectedProfile ? "" : "is-empty"}`}>
+        <div className="legacy-current-config" aria-label="当前 Codex 配置">
+          <span className={`legacy-current-dot ${officialLoginActive || activeProfile ? "active" : ""}`} />
+          <span>当前配置</span>
+          <strong>{bootstrap.isPending ? "正在读取…" : bootstrap.error ? "读取失败" : officialLoginActive ? "ChatGPT 官方" : activeProfile?.name ?? "其他 Codex 配置"}</strong>
+          <small>选择中转站旁的“切换”即可使用</small>
+        </div>
         {!selectedProfile ? (
           <div className="legacy-empty-main">
             <strong>{profiles.length === 0 ? "创建一个中转站" : "选择一个中转站"}</strong>
@@ -1087,17 +1122,16 @@ export default function App() {
               </div>
               <div className="legacy-header-actions">
                 <ProfileTools profile={selectedProfile} busy={busy} onEdit={() => openProfileEditor("edit")} onDuplicate={() => { if (ensureWorkspaceSaved()) duplicateProfile.mutate(selectedProfile.id); }} onDelete={() => { if (ensureWorkspaceSaved()) setConfirmAction("delete"); }} />
-                <button className="legacy-command-button primary legacy-apply-button" type="button" disabled={busy || context.isLoading} onClick={applySelectedProfile}>{selectedProfile.applyState === "applied" && !quickModelDirty && context.data?.syncState === "synced" ? <CircleCheck size={15} /> : <Route size={15} />}{checkApplied.isPending ? "正在检测" : quickModelDirty ? "保存并应用" : selectedProfile.applyState === "applied" && context.data?.syncState !== "synced" ? "应用配置" : selectedApplyState!.action}</button>
+                <button className="legacy-command-button primary legacy-apply-button" type="button" disabled={busy || context.isLoading || (selectedProfile.applyState === "applied" && !quickModelDirty && context.data?.syncState === "synced")} onClick={applySelectedProfile}>{selectedProfile.applyState === "applied" && !quickModelDirty && context.data?.syncState === "synced" ? <CircleCheck size={15} /> : <Route size={15} />}{prepareApply.isPending ? "正在切换…" : quickModelDirty ? "保存并切换" : profileConfigurationIssue(selectedProfile) ? "完善配置" : selectedProfile.applyState === "applied" && context.data?.syncState !== "synced" ? "更新当前配置" : selectedApplyState!.action}</button>
               </div>
             </header>
-            <RouteBand profile={selectedProfile} context={context.data} connection={connectionChecks[selectedProfile.id]} />
             <nav className="legacy-tabs" aria-label="中转站详情">
               <Tab label="概览" active={page === "relay"} onClick={() => changePage("relay")} />
               <Tab label="上下文" active={page === "context"} onClick={() => changePage("context")} />
               <Tab label="用量" active={page === "usage"} onClick={() => changePage("usage")} />
             </nav>
             <section className="legacy-page-content">
-              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} usage={todayUsage.data} usageLoading={todayUsage.isLoading} usageError={todayUsage.error} connection={connectionChecks[selectedProfile.id]} deepValidation={deepValidationChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} locked={busy} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onDeepValidate={runDeepValidation} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} onPageChange={changePage} />}
+              {page === "relay" && <RelayPage profile={selectedProfile} context={context.data} modelCache={modelCache.data} connection={connectionChecks[selectedProfile.id]} deepValidation={deepValidationChecks[selectedProfile.id]} modelDraft={quickModel} modelDirty={quickModelDirty} modelSaving={updateQuickModel.isPending} locked={busy} onModelDraft={changeQuickModel} onResetModel={resetQuickModel} onSaveModel={saveQuickModel} onCheck={runConnectionCheck} onDeepValidate={runDeepValidation} onCopyUrl={() => void copyBaseUrl()} onEdit={() => openProfileEditor("edit")} />}
               {page === "context" && <ContextPage context={context.data} draft={contextDraft} dirty={contextDirty} loading={context.isLoading} onChange={(next) => { setContextDraft(next); setContextDirty(true); }} />}
               {page === "usage" && <UsagePage usage={usage.data} loading={usage.isLoading} error={usage.error} period={usagePeriod} onPeriod={setUsagePeriod} />}
             </section>
@@ -1106,10 +1140,6 @@ export default function App() {
                 <StatusIcon busy={busy || usage.isFetching || checkConnection.isPending} tone={notice?.tone} />
                 <span>{notice?.text ?? (page === "usage" ? usage.error ? `本地用量读取失败：${messageFor(usage.error)}` : usage.data?.status ?? "正在读取本地用量数据" : statusText(page, contextDirty, quickModelDirty, context.data))}</span>
               </div>
-              {page === "relay" && <>
-                <button className="legacy-command-button" type="button" title={quickModelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={busy || quickModelDirty} onClick={runConnectionCheck}><Activity size={15} />{checkConnection.isPending ? "正在检查" : "检查连接"}</button>
-                <button className="legacy-command-button" type="button" disabled={busy} onClick={() => openProfileEditor("edit")}><Pencil size={15} />编辑配置</button>
-              </>}
               {page === "context" && <>
                 <button className="legacy-command-button" type="button" disabled={busy} onClick={() => { setContextDraft(defaultContext); setContextDirty(true); setNotice({ tone: "warning", text: "上下文已恢复为默认草稿，保存后生效" }); }}>恢复默认</button>
                 <button className="legacy-command-button primary" type="button" disabled={!canSaveContext || busy} onClick={() => saveContext.mutate(contextDraft)}>{context.data?.syncState === "unsynced" && !contextDirty ? "重试同步" : "保存到配置"}</button>
@@ -1121,12 +1151,13 @@ export default function App() {
             </footer>
           </>
         )}
+        {!selectedProfile && <footer className="legacy-statusbar"><div className={`legacy-status ${notice?.tone ?? "idle"}`} role="status"><StatusIcon busy={busy} tone={notice?.tone} /><span>{notice?.text ?? "添加中转站后，点击“切换”即可使用"}</span></div></footer>}
       </section>
 
       <ProfileEditor mode={editorMode} profile={editorProfile} saving={saveProfile.isPending || createProfile.isPending} windowCloseRequest={windowCloseEditorRequest} onDirtyChange={setProfileDirty} onClose={() => { setProfileDirty(false); setEditorSession(undefined); }} onWindowCloseResolved={() => { setProfileDirty(false); setEditorSession(undefined); if (contextDirty) setWindowCloseContext(true); else closeWindow(); }} onSubmit={(profileId, draft) => profileId ? saveProfile.mutateAsync({ profileId, draft }) : createProfile.mutateAsync(draft)} />
       <RouteAuditDialog open={routeAuditOpen} profiles={profiles} session={displayedRouteAuditSession} status={displayedRouteAuditStatus} locked={busy} historyMessage={routeAuditResults.data?.warning ?? (routeAuditResults.error ? messageFor(routeAuditResults.error) : undefined)} onOpenChange={setRouteAuditOpen} actions={{ start: () => void startRouteAudit(), stop: stopRouteAudit, retry: (profile) => void retryRouteAuditProfile(profile), edit: editRouteAuditProfile, apply: applyRouteAuditProfile, reloadHistory: () => void routeAuditResults.refetch() }} />
       <BackupCenterDialog open={backupCenterOpen} locked={busy} restorePending={prepareBackupRestore.isPending} restoreError={prepareBackupRestore.error ? messageFor(prepareBackupRestore.error) : undefined} onOpenChange={(open) => { setBackupCenterOpen(open); if (!open) { pendingBackupRestoreAt.current = undefined; prepareBackupRestore.reset(); } }} onClearRestoreError={() => prepareBackupRestore.reset()} onRestore={(backupId, liveRevision, createdAtUnixMs) => { pendingBackupRestoreAt.current = createdAtUnixMs; prepareBackupRestore.mutate({ backupId, liveRevision }); }} />
-      <QuickSwitcher open={quickSwitcherOpen} profiles={profiles} selectedId={selectedProfile?.id} onOpenChange={setQuickSwitcherOpen} onSelect={(profileId) => { setQuickSwitcherOpen(false); selectProfile(profileId); }} onCreate={() => { setQuickSwitcherOpen(false); openProfileEditor("create"); }} />
+      <QuickSwitcher open={quickSwitcherOpen} profiles={profiles} selectedId={selectedProfile?.id} onOpenChange={setQuickSwitcherOpen} onSelect={(profileId) => { setQuickSwitcherOpen(false); switchProfile(profileId); }} onCreate={() => { setQuickSwitcherOpen(false); openProfileEditor("create"); }} />
       <ActionConfirmation confirmation={confirmation} pending={continueAction.isPending} onClose={(token) => { setCloseAfterContextSave(false); setConfirmation(undefined); setDeferredSelectionId(undefined); pendingBackupRestoreAt.current = undefined; void api.dismissConfirmation(token); void refreshContext(); }} onChoice={(token, choice) => continueAction.mutate({ token, choice })} />
       <LegacyConfirm action={confirmAction} pending={deleteProfile.isPending || exportProfiles.isPending} onClose={() => setConfirmAction(null)} onConfirm={() => {
         if (confirmAction === "delete" && selectedProfile) deleteProfile.mutate(selectedProfile.id);
@@ -1147,7 +1178,7 @@ function RouteBand({ profile, context, connection }: { profile: ProfileSummary; 
   const host = routeHost(profile.baseUrl);
   const status = routeStatus(profile, context, connection);
   const applyState = describeApplyState(profile.applyState);
-  return <div className={`legacy-route-band ${applyState.routeClass}`} aria-label="当前 Codex 路由">
+  return <div className={`legacy-route-band ${applyState.routeClass}`} aria-label="所选中转站配置">
     <div className="legacy-route-node source"><span><Activity size={13} />Codex</span><strong>Desktop / CLI</strong></div>
     <ChevronRight className="legacy-route-arrow" size={17} />
     <div className="legacy-route-node"><span><Server size={13} />中转地址</span><strong>{host}</strong></div>
@@ -1157,12 +1188,7 @@ function RouteBand({ profile, context, connection }: { profile: ProfileSummary; 
   </div>;
 }
 
-function RelayPage({ profile, context, modelCache, usage, usageLoading, usageError, connection, deepValidation, modelDraft, modelDirty, modelSaving, locked, onModelDraft, onResetModel, onSaveModel, onCheck, onDeepValidate, onCopyUrl, onEdit, onPageChange }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; usage?: UsageView; usageLoading: boolean; usageError: unknown; connection?: ConnectionCheck; deepValidation?: DeepValidationCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; locked: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onDeepValidate: () => void; onCopyUrl: () => void; onEdit: () => void; onPageChange: (page: Page) => void }) {
-  const todayUsage = usageLoading
-    ? "正在读取本地用量数据"
-    : usageError
-      ? `本地用量读取失败：${messageFor(usageError)}`
-      : usage?.todaySummary ?? "今日暂无本地记录";
+function RelayPage({ profile, context, modelCache, connection, deepValidation, modelDraft, modelDirty, modelSaving, locked, onModelDraft, onResetModel, onSaveModel, onCheck, onDeepValidate, onCopyUrl, onEdit }: { profile: ProfileSummary; context?: ContextView; modelCache?: ModelListView; connection?: ConnectionCheck; deepValidation?: DeepValidationCheck; modelDraft: string; modelDirty: boolean; modelSaving: boolean; locked: boolean; onModelDraft: (model: string) => void; onResetModel: () => void; onSaveModel: (applyAfter: boolean) => void; onCheck: () => void; onDeepValidate: () => void; onCopyUrl: () => void; onEdit: () => void }) {
   const modelState = quickModelDraftState(profile.model, modelDraft);
   const modelChanged = modelState.dirty && modelState.valid;
   const applyState = describeApplyState(profile.applyState);
@@ -1177,14 +1203,14 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
   ];
   const blocked = readiness.some((item) => !item.ready && !item.warning);
   const needsAttention = readiness.some((item) => !item.ready) || connection?.state === "error";
-  const healthLabel = blocked ? "配置未就绪" : modelDirty ? "默认模型待保存" : !applyState.ready ? applyState.routeLabel : needsAttention ? "建议检查" : "可以应用";
+  const healthLabel = blocked ? "配置未就绪" : modelDirty ? "默认模型待保存" : !applyState.ready ? applyState.routeLabel : needsAttention ? "可按需检查" : "配置已就绪";
   const healthTone = blocked || connection?.state === "error" || applyState.tone === "error" ? "error" : needsAttention ? "warning" : "success";
 
   return <div className="legacy-scroll-page legacy-console-overview">
     <div className="legacy-overview-grid">
       <section className="legacy-overview-primary">
         <header className="legacy-console-section-head">
-          <div><span>连接与模型</span><strong>确认中转地址，并选择 Codex 要使用的模型。</strong></div>
+          <div><span>连接与模型</span><strong>确认信息后直接切换，原配置会自动备份。</strong></div>
           <button className="legacy-command-button" type="button" title={modelDirty ? "请先保存或撤销默认模型修改" : undefined} disabled={locked || connection?.state === "checking" || modelDirty} onClick={onCheck}><Activity size={15} />{connection?.state === "checking" ? "正在检查" : "检查连接"}</button>
         </header>
         <div className="legacy-detail-list">
@@ -1200,38 +1226,27 @@ function RelayPage({ profile, context, modelCache, usage, usageLoading, usageErr
             <span>默认模型</span>
             <div className="legacy-model-console">
               <div><div className="legacy-model-input-row"><input id="quick-model-input" aria-label="默认模型" list={`models-${profile.id}`} value={modelDraft} disabled={locked} onChange={(event) => onModelDraft(event.target.value)} placeholder="输入模型 ID" /><button className="legacy-inline-icon" type="button" title="撤销默认模型修改" aria-label="撤销默认模型修改" disabled={locked || !modelDirty || modelSaving} onClick={onResetModel}><RotateCcw size={15} /></button></div><datalist id={`models-${profile.id}`}>{modelCache?.models.map((model) => <option value={model} key={model} />)}</datalist><small>{modelDirty ? "有未保存修改，可保存或撤销" : modelCache?.cacheLabel ?? "检查连接后可从模型目录选择"}</small></div>
-              <button className="legacy-command-button" type="button" disabled={locked || !modelChanged || modelSaving} onClick={() => onSaveModel(false)}><Save size={15} />保存</button>
-              <button className="legacy-command-button primary" type="button" disabled={locked || !modelChanged || modelSaving} onClick={() => onSaveModel(true)}><Route size={15} />保存并应用</button>
+              {modelDirty && <button className="legacy-command-button" type="button" disabled={locked || !modelChanged || modelSaving} onClick={() => onSaveModel(false)}><Save size={15} />保存模型</button>}
             </div>
           </div>
+        </div>
+        {connection && <ConnectionResult connection={connection} />}
+        <details className="legacy-advanced-panel">
+          <summary>连接检查与高级信息 <span>可选</span></summary>
           <div className="legacy-detail-row">
             <span>审查模型</span>
             <div className="legacy-detail-value"><strong className="legacy-mono">{profile.reviewModel || "跟随默认模型"}</strong></div>
           </div>
-        </div>
-        <DeepValidationPanel profile={profile} check={deepValidation} modelDirty={modelDirty} locked={locked} onValidate={onDeepValidate} />
-        <div className="legacy-console-previews">
-          <button type="button" aria-label={`打开上下文设置，${context?.summary ?? "使用 Codex 默认上下文"}`} onClick={() => onPageChange("context")}>
-            <span><Cpu size={16} />上下文</span>
-            <strong>{context?.summary ?? "自动窗口 · 输出不限 · 自动压缩"}</strong>
-            <div className="legacy-mini-budget"><i style={{ width: `${(context?.budget.historyRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.instructionRatio ?? 0) * 100}%` }} /><i style={{ width: `${(context?.budget.remainingRatio ?? 1) * 100}%` }} /></div>
-            <ChevronRight size={17} />
-          </button>
-          <button type="button" aria-label={`打开用量统计，${todayUsage}`} onClick={() => onPageChange("usage")}>
-            <span><Activity size={16} />今日用量</span>
-            <strong>{todayUsage}</strong>
-            <small>{usage?.hasData ? `输入 ${usage.current.input} · 输出 ${usage.current.output} · ${usage.current.calls}` : "本地会话产生用量后会在这里汇总"}</small>
-            <ChevronRight size={17} />
-          </button>
-        </div>
+          <DeepValidationPanel profile={profile} check={deepValidation} modelDirty={modelDirty} locked={locked} onValidate={onDeepValidate} />
+          <RouteBand profile={profile} context={context} connection={connection} />
+          <section className="legacy-readiness-panel" aria-label="中转站配置检查">
+            <header><div><span>配置检查</span><strong className={healthTone}>{healthLabel}</strong></div><button className="legacy-inline-link" type="button" disabled={locked} onClick={onEdit}>编辑配置</button></header>
+            <div className="legacy-readiness-list">
+              {readiness.map((item) => <ReadinessItem key={item.label} {...item} />)}
+            </div>
+          </section>
+        </details>
       </section>
-      <aside className="legacy-readiness-panel" aria-label="中转站就绪检查">
-        <header><div><span>就绪检查</span><strong className={healthTone}>{healthLabel}</strong></div><button className="legacy-inline-link" type="button" disabled={locked} onClick={onEdit}>编辑配置</button></header>
-        <div className="legacy-readiness-list">
-          {readiness.map((item) => <ReadinessItem key={item.label} {...item} />)}
-        </div>
-        <ConnectionResult connection={connection} />
-      </aside>
     </div>
   </div>;
 }
@@ -1323,7 +1338,13 @@ function Summary({ label, value }: { label: string; value: string }) { return <d
 function Metric({ label, value }: { label: string; value: string }) { return <div className="legacy-metric"><span>{label}</span><strong>{value}</strong></div>; }
 
 function ProfileTools({ profile, busy, onEdit, onDuplicate, onDelete }: { profile: ProfileSummary; busy: boolean; onEdit: () => void; onDuplicate: () => void; onDelete: () => void }) {
-  return <div className="legacy-profile-tools" role="group" aria-label={`${profile.name} 操作`}><button type="button" title="编辑中转站" aria-label="编辑中转站" disabled={busy} onClick={onEdit}><Pencil size={16} /></button><button type="button" title="复制此中转站" aria-label="复制此中转站" disabled={busy} onClick={onDuplicate}><Copy size={16} /></button><button type="button" title="删除此中转站" aria-label="删除此中转站" disabled={busy} onClick={onDelete}><Trash2 size={16} /></button></div>;
+  return <div className="legacy-profile-tools" role="group" aria-label={`${profile.name} 操作`}>
+    <button type="button" title="编辑中转站" aria-label="编辑中转站" disabled={busy} onClick={onEdit}><Pencil size={16} /><span>编辑</span></button>
+    <details className="legacy-more-menu profile" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) event.currentTarget.open = false; }} onClick={(event) => { if ((event.target as Element).closest("button")) event.currentTarget.open = false; }}>
+      <summary aria-label="中转站更多操作"><MoreHorizontal size={17} /></summary>
+      <div><button type="button" disabled={busy} onClick={onDuplicate}><Copy size={15} />复制中转站</button><button type="button" disabled={busy} onClick={onDelete}><Trash2 size={15} />删除中转站</button></div>
+    </details>
+  </div>;
 }
 
 function QuickSwitcher({ open, profiles, selectedId, onOpenChange, onSelect, onCreate }: { open: boolean; profiles: ProfileSummary[]; selectedId?: string; onOpenChange: (open: boolean) => void; onSelect: (profileId: string) => void; onCreate: () => void }) {

@@ -1707,6 +1707,50 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn relay_and_official_switches_read_the_auth_file_instead_of_stale_keyring_credentials() {
+        let (_temp, paths, manager) = fixture();
+        let config = format!("cli_auth_credentials_store = \"keyring\"\n{ORIGINAL_CONFIG}");
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        let relay = activation("relay-only-model");
+
+        manager.apply(&relay, ConflictPolicy::Reject).unwrap();
+        let relay_config = fs::read_to_string(&paths.codex_config).unwrap();
+        let document = relay_config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            document["cli_auth_credentials_store"].as_str(),
+            Some("file"),
+            "Codex must read the relay credentials written to auth.json"
+        );
+
+        // Another tool may have changed the credential store before switching back.
+        let config = relay_config.replace(
+            "cli_auth_credentials_store = \"file\"",
+            "cli_auth_credentials_store = \"keyring\"",
+        );
+        durable_fs::atomic_write(&paths.codex_config, config.as_bytes()).unwrap();
+        manager
+            .restore_official_login(&manager.live_revision().unwrap())
+            .unwrap();
+        let config = fs::read_to_string(&paths.codex_config).unwrap();
+        let document = config.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            document["cli_auth_credentials_store"].as_str(),
+            Some("file"),
+            "Codex must read the official session preserved in auth.json"
+        );
+        let auth: serde_json::Value =
+            serde_json::from_slice(&fs::read(&paths.codex_auth).unwrap()).unwrap();
+        assert!(auth.get("OPENAI_API_KEY").is_none());
+        assert_eq!(auth["tokens"]["preserve"], true);
+
+        manager.apply(&relay, ConflictPolicy::Reject).unwrap();
+        assert_eq!(
+            manager.load_state().unwrap().unwrap().active_profile_id,
+            Some(relay.profile_id)
+        );
+    }
+
+    #[test]
     fn official_login_preserves_session_and_settings_and_can_restore_relay_backup() {
         let (_temp, paths, manager) = fixture();
         let relay = activation("relay-only-model");

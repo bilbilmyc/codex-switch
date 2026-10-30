@@ -31,8 +31,8 @@ const profiles: ProfileSummary[] = [
 ];
 
 describe("profile console", () => {
-  it("checks an applied configuration without asking to apply it again", () => {
-    expect(describeApplyState("applied").action).toBe("检测生效");
+  it("clearly identifies the current configuration", () => {
+    expect(describeApplyState("applied").action).toBe("当前配置");
     expect(describeApplyState("applied").routeDetail).not.toContain("正在使用");
   });
   it("filters profiles by name, model, or base URL without case sensitivity", () => {
@@ -63,11 +63,11 @@ describe("profile console", () => {
   });
 
   it.each<[ProfileApplyState, string, string, string]>([
-    ["applied", "当前 Codex 路由", "已应用", "success"],
-    ["pending_changes", "当前中转站有未应用修改", "待应用", "warning"],
+    ["applied", "当前 Codex 配置", "当前", "success"],
+    ["pending_changes", "中转站有已保存的修改", "待更新", "warning"],
     ["external_drift", "Codex 配置已被外部修改", "外部变更", "error"],
     ["unknown", "无法确认当前 Codex 路由", "待确认", "unknown"],
-    ["inactive", "已选择，尚未应用", "", "staged"],
+    ["inactive", "已保存的中转站", "", "staged"],
   ])("describes the %s apply state without conflating it with another state", (state, kicker, badge, tone) => {
     expect(describeApplyState(state)).toMatchObject({ kicker, badge, tone });
   });

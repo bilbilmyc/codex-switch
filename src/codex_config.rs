@@ -129,6 +129,9 @@ pub fn patch_codex_config(
     if root.get("forced_login_method").and_then(Item::as_str) == Some("chatgpt") {
         root.remove("forced_login_method");
     }
+    // Both switch directions write auth.json. A keyring (or a preferred keyring in
+    // auto mode) would otherwise keep supplying credentials from the previous route.
+    set_string_preserving_decor(root, "cli_auth_credentials_store", "file")?;
     set_string_preserving_decor(root, "model_provider", &provider_id)?;
     set_string_preserving_decor(root, "model", &activation.model)?;
     if let Some(review_model) = &activation.review_model {
@@ -181,6 +184,7 @@ pub fn patch_official_login_config(raw: &str) -> Result<String, CodexConfigError
     remove_context_fields(root);
     set_string_preserving_decor(root, "model_provider", "openai")?;
     set_string_preserving_decor(root, "forced_login_method", "chatgpt")?;
+    set_string_preserving_decor(root, "cli_auth_credentials_store", "file")?;
     // A user-defined `openai` entry can override the built-in official endpoint.
     if let Some(providers) = root.get_mut("model_providers") {
         providers
@@ -276,7 +280,7 @@ command = "example"
             root["mcp_servers"]["example"]["command"].as_str(),
             Some("example")
         );
-        assert_eq!(root["cli_auth_credentials_store"].as_str(), Some("keyring"));
+        assert_eq!(root["cli_auth_credentials_store"].as_str(), Some("file"));
         assert!(patched.contains("# keep settings"));
     }
 

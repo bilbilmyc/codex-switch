@@ -7,6 +7,10 @@
   --color-shell: #17191f;
   --color-shell-raised: #23262e;
   --color-shell-selected: #30343e;
+  --color-shell-muted: #acb7c8;
+  --color-shell-success: #79d7b4;
+  --color-shell-success-soft: #223a32;
+  --color-shell-success-line: #396556;
   --color-workspace: #f3f6f9;
   --color-surface: #ffffff;
   --color-surface-muted: #edf2f7;
@@ -68,6 +72,11 @@ button {
 
 button:focus-visible,
 input:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+summary:focus-visible {
   outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
@@ -233,13 +242,57 @@ button:disabled {
   width: 100%;
   min-height: 58px;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   border: 0;
   border-left: 3px solid transparent;
   background: transparent;
   color: var(--color-surface);
-  padding: 8px 14px 8px 11px;
+  padding: 8px 10px 8px 11px;
   text-align: left;
+}
+
+.legacy-profile-select {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.legacy-row-switch {
+  display: inline-flex;
+  min-width: 44px;
+  min-height: 29px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  border: 1px solid var(--color-shell-selected);
+  border-radius: 5px;
+  background: var(--color-shell-raised);
+  color: var(--color-surface);
+  font-size: 11px;
+}
+
+.legacy-row-switch:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+}
+
+.legacy-row-switch:active:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.legacy-row-switch.current:disabled {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-shell-success);
+  opacity: 1;
 }
 
 .legacy-profile-row:hover:not(:disabled) {
@@ -334,21 +387,54 @@ button:disabled {
 }
 
 .legacy-official-login {
-  padding: 8px 12px;
+  padding: 4px 12px 10px;
 }
 
 .legacy-official-login button {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   gap: 8px;
   width: 100%;
-  min-height: 36px;
+  min-height: 60px;
   border: 1px solid var(--color-shell-selected);
   border-radius: 5px;
   background: transparent;
   color: var(--color-surface);
   font-size: 12px;
+  padding: 10px;
+}
+
+.legacy-official-login button > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 4px;
+  text-align: left;
+}
+
+.legacy-official-login strong {
+  font-size: 12px;
+}
+
+.legacy-official-login small {
+  color: var(--color-shell-muted);
+  font-size: 10px;
+}
+
+.legacy-official-login em {
+  font-size: 11px;
+  font-style: normal;
+}
+
+.legacy-official-login.current button:disabled {
+  border-color: var(--color-shell-success-line);
+  background: var(--color-shell-success-soft);
+  opacity: 1;
+}
+
+.legacy-official-login.current em {
+  color: var(--color-shell-success);
 }
 
 .legacy-official-login button:hover:not(:disabled) {
@@ -361,7 +447,7 @@ button:disabled {
   align-items: center;
   gap: 1px;
   border-top: 1px solid var(--color-shell-selected);
-  padding: 8px 6px;
+  padding: 8px 14px;
 }
 
 .legacy-sidebar-footer button {
@@ -384,6 +470,118 @@ button:disabled {
 
 .legacy-sidebar-footer > span {
   flex: 1;
+  color: var(--color-shell-muted);
+  font-size: 11px;
+}
+
+.legacy-more-menu {
+  position: relative;
+}
+
+.legacy-more-menu summary {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 0 7px;
+  cursor: pointer;
+  font-size: 12px;
+  list-style: none;
+}
+
+.legacy-more-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.legacy-more-menu summary:hover,
+.legacy-more-menu[open] summary {
+  background: var(--color-shell-raised);
+}
+
+.legacy-more-menu > div {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  min-width: 190px;
+  gap: 3px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+  padding: 6px;
+  box-shadow: var(--shadow-dialog);
+}
+
+.legacy-more-menu > div button {
+  display: flex;
+  width: 100%;
+  min-height: 35px;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--color-ink);
+  padding: 8px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.legacy-more-menu > div button:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+.legacy-more-menu.profile > div {
+  top: calc(100% + 8px);
+  bottom: auto;
+  min-width: 158px;
+}
+
+.legacy-more-menu.profile summary:hover,
+.legacy-more-menu.profile[open] summary {
+  background: var(--color-surface-muted);
+}
+
+.legacy-current-config {
+  display: flex;
+  min-width: 0;
+  min-height: 46px;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid var(--color-line);
+  background: var(--color-surface);
+  padding: 10px 24px;
+  color: var(--color-muted);
+  font-size: 12px;
+}
+
+.legacy-current-config strong {
+  overflow: hidden;
+  color: var(--color-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.legacy-current-config small {
+  margin-left: auto;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.legacy-current-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-line-strong);
+}
+
+.legacy-current-dot.active {
+  background: var(--color-success);
 }
 
 .legacy-main {
@@ -394,9 +592,13 @@ button:disabled {
   background: var(--color-workspace);
 }
 
+.legacy-main.is-empty {
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
 .legacy-empty-main {
   display: flex;
-  min-height: 100vh;
+  min-height: 0;
   align-items: center;
   justify-content: center;
   flex-direction: column;
@@ -504,6 +706,14 @@ button:disabled {
 .legacy-profile-tools button:hover:not(:disabled) {
   background: var(--color-accent-soft);
   color: var(--color-accent);
+}
+
+.legacy-profile-tools > button {
+  display: inline-flex;
+  width: auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
 }
 
 .legacy-apply-button {
@@ -719,13 +929,12 @@ button:disabled {
 
 .legacy-overview-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.75fr);
-  border-bottom: 1px solid var(--color-line);
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .legacy-overview-primary {
   min-width: 0;
-  padding: 22px 24px 24px 0;
+  padding: 22px 0 24px;
 }
 
 .legacy-overview-primary .legacy-detail-row {
@@ -862,10 +1071,42 @@ button:disabled {
 .legacy-model-console {
   display: grid;
   min-width: 0;
-  grid-template-columns: minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 7px;
   padding: 8px 0;
+}
+
+.legacy-advanced-panel {
+  margin-top: 24px;
+  border-top: 1px solid var(--color-line);
+}
+
+.legacy-advanced-panel > summary {
+  padding: 17px 0;
+  color: var(--color-muted-strong);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.legacy-advanced-panel > summary span {
+  margin-left: 6px;
+  color: var(--color-muted);
+  font-size: 11px;
+}
+
+.legacy-advanced-panel > summary:hover {
+  color: var(--color-accent);
+}
+
+.legacy-advanced-panel .legacy-readiness-panel {
+  border-left: 0;
+  background: transparent;
+  padding: 20px 0 0;
+}
+
+.legacy-sidebar-footer .legacy-more-menu > div button:hover:not(:disabled) {
+  background: var(--color-surface-muted);
 }
 
 .legacy-model-console > div {
@@ -2815,7 +3056,7 @@ button:disabled {
   }
 
   .legacy-overview-grid {
-    grid-template-columns: minmax(0, 1.4fr) minmax(248px, 0.72fr);
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .legacy-model-console {
@@ -2829,6 +3070,15 @@ button:disabled {
 }
 
 @media (max-width: 768px) {
+  .legacy-current-config {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .legacy-current-config small {
+    display: none;
+  }
+
   .legacy-app-shell {
     display: block;
   }
@@ -2854,7 +3104,7 @@ button:disabled {
   }
 
   .legacy-profile-row {
-    min-width: 184px;
+    min-width: 240px;
     min-height: 52px;
     border-left: 0;
     border-bottom: 2px solid transparent;

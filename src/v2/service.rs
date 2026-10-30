@@ -81,6 +81,7 @@ pub enum ProfileApplyState {
 pub struct Bootstrap {
     pub profiles: Vec<ProfileSummary>,
     pub can_restore: bool,
+    pub official_login_active: bool,
     pub startup_message: Option<String>,
 }
 
@@ -387,11 +388,16 @@ pub struct Confirmation {
 }
 
 #[derive(Clone, Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 pub enum ApplyResponse {
     Applied {
         active_profile_id: String,
         warning: Option<String>,
+        restart_required: bool,
     },
     RequiresConfirmation {
         confirmation: Confirmation,
@@ -406,6 +412,7 @@ pub enum ApplyResponse {
     },
     OfficialLoginRestored {
         warning: Option<String>,
+        restart_required: bool,
     },
     ContextSaved {
         context: ContextView,
@@ -424,11 +431,6 @@ enum PendingConfirmation {
         activation: Activation,
         desktop_executable: Option<PathBuf>,
         desktop_only: bool,
-    },
-    Conflict {
-        activation: Activation,
-        desktop_executable: Option<PathBuf>,
-        desktop_was_closed: bool,
     },
     RestoreProcess {
         backup_id: crate::transaction::BackupId,
@@ -492,6 +494,7 @@ impl AppService {
             .map_err(ServiceError::transaction)?;
         self.migrate_legacy_profiles_if_needed()?;
         let first_run = !self.paths.profiles.exists();
+        let official_login_active = self.official_login_active();
         let mut startup_message = match recovery {
             crate::transaction::RecoveryOutcome::None => None,
             crate::transaction::RecoveryOutcome::RolledBack { .. } => {
@@ -509,13 +512,15 @@ impl AppService {
                     self.store()
                         .save(&ProfilesDocument::default())
                         .map_err(ServiceError::profiles)?;
-                    startup_message = Some("未能自动导入当前配置，可手动新建中转站".to_owned());
+                    if !official_login_active {
+                        startup_message = Some("未能自动导入当前配置，可手动新建中转站".to_owned());
+                    }
                 }
             }
         }
         let document = self.store().load().map_err(ServiceError::profiles)?;
         let active_profile_id = self.active_profile_id(&document);
-        let (live_profile, baseline_matches) = self.live_apply_context();
+        let (live_profile, baseline_matches, auth_ready) = self.live_apply_context();
 
         Ok(Bootstrap {
             profiles: document
@@ -527,18 +532,97 @@ impl AppService {
                         active_profile_id,
                         live_profile.as_ref(),
                         baseline_matches,
+                        auth_ready,
                     )
                 })
                 .collect(),
             can_restore: TransactionManager::new(self.paths.clone())
                 .has_backup()
                 .unwrap_or(false),
+            official_login_active,
             startup_message,
         })
     }
 
+    fn official_login_active(&self) -> bool {
+        let config = match durable_fs::read_optional(&self.paths.codex_config) {
+            Ok(Some(raw)) => match std::str::from_utf8(&raw)
+                .ok()
+                .and_then(|raw| raw.parse::<toml::Table>().ok())
+            {
+                Some(config) => config,
+                None => return false,
+            },
+            Ok(None) => toml::Table::new(),
+            Err(_) => return false,
+        };
+        let provider = config.get("model_provider").and_then(toml::Value::as_str);
+        let login = config
+            .get("forced_login_method")
+            .and_then(toml::Value::as_str);
+        if !matches!(provider, None | Some("openai"))
+            || !matches!(login, None | Some("chatgpt"))
+            || [
+                "openai_base_url",
+                "chatgpt_base_url",
+                "chatgpt_auth_base_url",
+                "profile",
+            ]
+            .iter()
+            .any(|key| config.contains_key(*key))
+            || config
+                .get("model_providers")
+                .and_then(|providers| providers.get("openai"))
+                .is_some()
+        {
+            return false;
+        }
+        if login == Some("chatgpt") {
+            return true;
+        }
+        durable_fs::read_optional(&self.paths.codex_auth)
+            .ok()
+            .is_some_and(|auth| {
+                codex_config::inspect_auth_api_key(auth.as_deref()).is_ok_and(|key| key.is_none())
+            })
+    }
+
     fn operation_guard(&self) -> Result<MutexGuard<'_, ()>, ServiceError> {
         self.operations.lock().map_err(|_| ServiceError::internal())
+    }
+
+    fn relay_auth_ready(&self) -> bool {
+        let Some(config) = fs::read_to_string(&self.paths.codex_config)
+            .ok()
+            .and_then(|raw| raw.parse::<toml::Table>().ok())
+        else {
+            return false;
+        };
+        let uses_file = match config.get("cli_auth_credentials_store") {
+            None => true,
+            Some(toml::Value::String(store)) => store == "file",
+            _ => false,
+        };
+        let allows_api_key = match config.get("forced_login_method") {
+            None => true,
+            Some(toml::Value::String(method)) => method == "api",
+            _ => false,
+        };
+        if !uses_file || !allows_api_key {
+            return false;
+        }
+        let Some(auth) = fs::read(&self.paths.codex_auth)
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
+            .filter(serde_json::Value::is_object)
+        else {
+            return false;
+        };
+        match auth.get("auth_mode") {
+            None | Some(serde_json::Value::Null) => true,
+            Some(serde_json::Value::String(mode)) => mode == "apikey",
+            _ => false,
+        }
     }
 
     pub fn new_profile(&self) -> Result<ProfileSummary, ServiceError> {
@@ -936,7 +1020,8 @@ impl AppService {
         let live = read_live_profile(&self.paths)?;
         Ok(same_connection(profile, &live)
             && live.context == Some(configured_context(profile.context))
-            && catalog_matches_context(&self.paths, profile))
+            && catalog_matches_context(&self.paths, profile)
+            && self.relay_auth_ready())
     }
 
     pub fn load_context(&self, profile_id: String) -> Result<ContextView, ServiceError> {
@@ -1070,7 +1155,7 @@ impl AppService {
         Ok(ApplyResponse::RequiresConfirmation {
             confirmation: Confirmation {
                 token,
-                title: "恢复官方登录".to_owned(),
+                title: "切换到官方登录".to_owned(),
                 detail: if desktop_only {
                     "Codex Desktop 正在运行。退出后将备份当前配置、恢复官方登录并重新打开 Codex。已保存的中转站和已有官方登录凭据会保留。".to_owned()
                 } else {
@@ -1080,13 +1165,13 @@ impl AppService {
                     vec![
                         option(
                             "quit_desktop_and_restore_official",
-                            "退出并恢复官方登录",
+                            "重启 Codex 并切换",
                             ConfirmationIntent::Primary,
                         ),
                         option(
                             "restore_official_anyway",
-                            "仍然恢复",
-                            ConfirmationIntent::Danger,
+                            "仅修改配置，稍后重启",
+                            ConfirmationIntent::Neutral,
                         ),
                     ]
                 } else {
@@ -1094,8 +1179,8 @@ impl AppService {
                         option("recheck_official", "重新检测", ConfirmationIntent::Primary),
                         option(
                             "restore_official_anyway",
-                            "仍然恢复",
-                            ConfirmationIntent::Danger,
+                            "仅修改配置，稍后重启",
+                            ConfirmationIntent::Neutral,
                         ),
                     ]
                 },
@@ -1116,6 +1201,8 @@ impl AppService {
             .flatten();
         match result {
             Ok(_) => Ok(ApplyResponse::OfficialLoginRestored {
+                restart_required: relaunch_error.is_some()
+                    || (!desktop_was_closed && !process::detect_codex_processes().is_clear()),
                 warning: relaunch_error
                     .map(|error| format!("已恢复官方登录，但 Codex Desktop 未能重新打开：{error}")),
             }),
@@ -1138,7 +1225,7 @@ impl AppService {
         let report = process::detect_codex_processes();
 
         if report.is_clear() {
-            return self.apply_activation(activation, ConflictPolicy::Reject, false, None);
+            return self.apply_activation(activation, false, None);
         }
 
         let desktop_only = report.has_desktop() && !report.has_command_line();
@@ -1193,17 +1280,12 @@ impl AppService {
                 "quit_desktop_and_apply" if desktop_only => {
                     process::quit_desktop_safely(Duration::from_secs(8))
                         .map_err(ServiceError::process)?;
-                    self.apply_activation(
-                        activation,
-                        ConflictPolicy::Reject,
-                        true,
-                        desktop_executable,
-                    )
+                    self.apply_activation(activation, true, desktop_executable)
                 }
                 "recheck" if !desktop_only => {
                     let report = process::detect_codex_processes();
                     if report.is_clear() {
-                        self.apply_activation(activation, ConflictPolicy::Reject, false, None)
+                        self.apply_activation(activation, false, None)
                     } else {
                         let next_desktop_only = report.has_desktop() && !report.has_command_line();
                         let pending = PendingConfirmation::Process {
@@ -1217,24 +1299,7 @@ impl AppService {
                         })
                     }
                 }
-                "apply_anyway" => {
-                    self.apply_activation(activation, ConflictPolicy::Reject, false, None)
-                }
-                _ => Err(ServiceError::invalid_confirmation()),
-            },
-            PendingConfirmation::Conflict {
-                activation,
-                desktop_executable,
-                desktop_was_closed,
-            } => match choice.as_str() {
-                "overwrite" => self.apply_activation(
-                    activation,
-                    ConflictPolicy::Overwrite,
-                    desktop_was_closed,
-                    desktop_executable,
-                ),
-                "import_current" => self
-                    .import_current_profile_with_relaunch(desktop_was_closed, desktop_executable),
+                "apply_anyway" => self.apply_activation(activation, false, None),
                 _ => Err(ServiceError::invalid_confirmation()),
             },
             PendingConfirmation::RestoreProcess {
@@ -1405,22 +1470,23 @@ impl AppService {
 
     fn profile_summary(&self, profile: &Profile, document: &ProfilesDocument) -> ProfileSummary {
         let active_profile_id = self.active_profile_id(document);
-        let (live_profile, baseline_matches) = self.live_apply_context();
+        let (live_profile, baseline_matches, auth_ready) = self.live_apply_context();
         ProfileSummary::from_profile(
             profile,
             active_profile_id,
             live_profile.as_ref(),
             baseline_matches,
+            auth_ready,
         )
     }
 
-    fn live_apply_context(&self) -> (Option<Profile>, RelevantFingerprintMatch) {
+    fn live_apply_context(&self) -> (Option<Profile>, RelevantFingerprintMatch, bool) {
         let live_profile = read_live_profile(&self.paths).ok();
         let baseline_matches = match TransactionManager::new(self.paths.clone()).load_state() {
             Ok(Some(state)) => current_fingerprint_match(&self.paths, &state.relevant_fingerprint),
             Ok(None) | Err(_) => RelevantFingerprintMatch::Unknown,
         };
-        (live_profile, baseline_matches)
+        (live_profile, baseline_matches, self.relay_auth_ready())
     }
 
     fn migrate_legacy_profiles_if_needed(&self) -> Result<(), ServiceError> {
@@ -1471,15 +1537,19 @@ impl AppService {
         let token = self.remember(pending);
         let (detail, options) = if desktop_only {
             (
-                "Codex Desktop 正在运行。先退出再切换可避免正在运行的会话继续使用旧配置。"
+                "重启 Codex 后使用新的中转站。切换前会自动备份当前配置，请先保存正在进行的工作。"
                     .to_owned(),
                 vec![
                     option(
                         "quit_desktop_and_apply",
-                        "退出并切换",
+                        "重启 Codex 并切换",
                         ConfirmationIntent::Primary,
                     ),
-                    option("apply_anyway", "仍然切换", ConfirmationIntent::Danger),
+                    option(
+                        "apply_anyway",
+                        "仅修改配置，稍后重启",
+                        ConfirmationIntent::Neutral,
+                    ),
                 ],
             )
         } else {
@@ -1487,7 +1557,7 @@ impl AppService {
                 "检测到 Codex 命令行任务或多个 Codex 进程。请先结束相关任务，避免会话继续使用旧配置。".to_owned(),
                 vec![
                     option("recheck", "重新检测", ConfirmationIntent::Primary),
-                    option("apply_anyway", "仍然切换", ConfirmationIntent::Danger),
+                    option("apply_anyway", "仅修改配置，稍后重启", ConfirmationIntent::Neutral),
                 ],
             )
         };
@@ -1503,7 +1573,6 @@ impl AppService {
     fn apply_activation(
         &self,
         mut activation: Activation,
-        policy: ConflictPolicy,
         desktop_was_closed: bool,
         desktop_executable: Option<PathBuf>,
     ) -> Result<ApplyResponse, ServiceError> {
@@ -1513,23 +1582,21 @@ impl AppService {
         let staged_validator = validator
             .as_ref()
             .map(|validator| validator as &dyn crate::transaction::StagedValidator);
-        let validation_skipped = staged_validator.is_none();
-
-        match manager.apply_validated(&activation, policy, staged_validator) {
+        // Switching is an explicit request to use this saved relay. The transaction
+        // backs up the live files and patches only managed fields, so external edits
+        // need not turn a normal switch into an import/overwrite decision.
+        match manager.apply_validated(&activation, ConflictPolicy::Overwrite, staged_validator) {
             Ok(outcome) => {
                 let relaunch_warning = desktop_was_closed
                     .then(|| process::relaunch_desktop(desktop_executable.as_deref()).err())
                     .flatten()
                     .map(|error| format!("切换完成，但 Codex Desktop 未能重新打开：{error}"));
-                let warnings: Vec<String> = [
-                    relaunch_warning,
-                    validation_skipped
-                        .then_some("切换完成；未找到 Codex 校验器，仅完成结构校验".to_owned()),
-                    outcome.catalog_warning,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
+                let restart_required = relaunch_warning.is_some()
+                    || (!desktop_was_closed && !process::detect_codex_processes().is_clear());
+                let warnings: Vec<String> = [relaunch_warning, outcome.catalog_warning]
+                    .into_iter()
+                    .flatten()
+                    .collect();
                 let warning = (!warnings.is_empty()).then(|| warnings.join("；"));
                 Ok(ApplyResponse::Applied {
                     active_profile_id: outcome
@@ -1537,31 +1604,7 @@ impl AppService {
                         .active_profile_id
                         .map_or_else(String::new, |id| id.to_string()),
                     warning,
-                })
-            }
-            Err(TransactionError::ExternalConflict(conflict)) => {
-                let token = self.remember(PendingConfirmation::Conflict {
-                    activation,
-                    desktop_executable,
-                    desktop_was_closed,
-                });
-                Ok(ApplyResponse::RequiresConfirmation {
-                    confirmation: Confirmation {
-                        token,
-                        title: "检测到外部修改".to_owned(),
-                        detail: format!(
-                            "Codex 的中转站或模型配置已在工具外发生变化。{}",
-                            if conflict.to_string().is_empty() {
-                                String::new()
-                            } else {
-                                "请选择如何继续。".to_owned()
-                            }
-                        ),
-                        options: vec![
-                            option("import_current", "导入当前", ConfirmationIntent::Primary),
-                            option("overwrite", "覆盖", ConfirmationIntent::Danger),
-                        ],
-                    },
+                    restart_required,
                 })
             }
             Err(error) => {
@@ -1948,10 +1991,13 @@ impl ProfileSummary {
         active_profile_id: Option<ProfileId>,
         live_profile: Option<&Profile>,
         baseline_matches: RelevantFingerprintMatch,
+        auth_ready: bool,
     ) -> Self {
         let is_active = active_profile_id == Some(profile.id);
         let apply_state = if !is_active {
             ProfileApplyState::Inactive
+        } else if !auth_ready && live_profile.is_some() {
+            ProfileApplyState::ExternalDrift
         } else {
             match live_profile {
                 Some(live) if same_connection(profile, live) => ProfileApplyState::Applied,
@@ -2919,6 +2965,62 @@ mod tests {
     }
 
     #[test]
+    fn switching_relays_backs_up_external_edits_without_an_import_or_overwrite_prompt() {
+        let (_home, service) = service();
+        let first = service.create_profile(draft("Relay A")).unwrap();
+        let second = service.create_profile(draft("Relay B")).unwrap();
+        let document = service.store().load().unwrap();
+        let activation_for = |id: &str| {
+            document
+                .get(id.parse().unwrap())
+                .unwrap()
+                .activation()
+                .unwrap()
+        };
+        let manager = TransactionManager::new(service.paths.clone());
+        manager
+            .apply(&activation_for(&first.id), ConflictPolicy::Reject)
+            .unwrap();
+        let external = fs::read_to_string(&service.paths.codex_config)
+            .unwrap()
+            .replace("gpt-5.2-codex", "externally-selected-model");
+        let external = format!("approval_policy = \"on-request\"\n{external}");
+        durable_fs::atomic_write(&service.paths.codex_config, external.as_bytes()).unwrap();
+
+        // Exercise the same continuation used when Codex is running, without controlling
+        // any real desktop or CLI process in the test environment.
+        let token = service.remember(PendingConfirmation::Process {
+            activation: activation_for(&second.id),
+            desktop_executable: None,
+            desktop_only: false,
+        });
+        let response = service
+            .continue_apply(token, "apply_anyway".to_owned())
+            .unwrap();
+        assert!(
+            matches!(response, ApplyResponse::Applied { .. }),
+            "a switch must not ask the user to import or overwrite the current configuration"
+        );
+        let response = serde_json::to_value(response).unwrap();
+        assert_eq!(response["activeProfileId"], second.id);
+        assert!(response["restartRequired"].is_boolean());
+        let config = fs::read_to_string(&service.paths.codex_config).unwrap();
+        assert!(config.contains("approval_policy = \"on-request\""));
+        assert!(config.contains(&provider_id_for_profile(second.id.parse().unwrap())));
+        assert!(!config.contains("externally-selected-model"));
+        assert!(manager.list_backups().unwrap().iter().any(|backup| {
+            fs::read(
+                service
+                    .paths
+                    .backups_dir
+                    .join(backup.id.to_string())
+                    .join("config.toml"),
+            )
+            .is_ok_and(|contents| contents == external.as_bytes())
+        }));
+    }
+
+    #[test]
     fn official_login_keeps_saved_profiles_and_clears_active_status() {
         let (_home, service) = service();
         let created = service.create_profile(draft("Saved relay")).unwrap();
@@ -2932,6 +3034,7 @@ mod tests {
         assert!(!value.to_string().contains("sk-v2-test"));
         assert_eq!(fs::read(&service.paths.profiles).unwrap(), profiles);
         let bootstrap = service.bootstrap().unwrap();
+        assert!(bootstrap.official_login_active);
         assert_eq!(bootstrap.profiles[0].id, created.id);
         assert!(!bootstrap.profiles[0].is_active);
         assert!(bootstrap.profiles[0].has_api_key);
@@ -3516,6 +3619,51 @@ requires_openai_auth = true
     }
 
     #[test]
+    fn credential_store_drift_does_not_report_a_relay_as_applied() {
+        let (_home, service) = service();
+        let created = service.create_profile(draft("Relay A")).unwrap();
+        let profile_id: ProfileId = created.id.parse().unwrap();
+        let document = service.store().load().unwrap();
+        TransactionManager::new(service.paths.clone())
+            .apply(
+                &document.get(profile_id).unwrap().activation().unwrap(),
+                ConflictPolicy::Reject,
+            )
+            .unwrap();
+        let original = fs::read_to_string(&service.paths.codex_config).unwrap();
+        let auth = fs::read(&service.paths.codex_auth).unwrap();
+        for store in ["keyring", "auto"] {
+            let config = original.replace(
+                "cli_auth_credentials_store = \"file\"",
+                &format!("cli_auth_credentials_store = \"{store}\""),
+            );
+            fs::write(&service.paths.codex_config, config).unwrap();
+            assert!(
+                !service.check_applied(created.id.clone()).unwrap(),
+                "{store}"
+            );
+            assert_eq!(
+                service.bootstrap().unwrap().profiles[0].apply_state,
+                ProfileApplyState::ExternalDrift,
+                "{store}"
+            );
+        }
+        fs::write(&service.paths.codex_config, original).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&auth).unwrap();
+        value["auth_mode"] = serde_json::json!("chatgpt");
+        fs::write(
+            &service.paths.codex_auth,
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(!service.check_applied(created.id).unwrap());
+        assert_eq!(
+            service.bootstrap().unwrap().profiles[0].apply_state,
+            ProfileApplyState::ExternalDrift
+        );
+    }
+
+    #[test]
     fn check_applied_is_read_only_and_detects_context_catalog_and_model_drift() {
         let (_home, service) = service();
         let created = service.create_profile(draft("Relay A")).unwrap();
@@ -3940,12 +4088,11 @@ requires_openai_auth = true
         let document = service.store().load().unwrap();
         let activation = document.get(profile_id).unwrap().activation().unwrap();
 
-        let response = service
-            .apply_activation(activation, ConflictPolicy::Reject, false, None)
-            .unwrap();
+        let response = service.apply_activation(activation, false, None).unwrap();
         let ApplyResponse::Applied {
             active_profile_id,
             warning,
+            ..
         } = response
         else {
             panic!("expected the V2 apply flow to complete");

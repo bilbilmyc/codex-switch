@@ -31,6 +31,7 @@ let previewProfiles: ProfileSummary[] = [
 ];
 
 let previewLiveProfile = { ...previewProfiles[0] };
+let previewOfficialLoginActive = false;
 const previewContexts = new Map<string, ContextView>();
 
 const previewBackups: BackupCenterView["backups"] = [
@@ -172,7 +173,7 @@ export const api = {
   },
   async bootstrap(): Promise<Bootstrap> {
     if (isTauri) return invoke<Bootstrap>("bootstrap");
-    return { profiles: previewProfiles, canRestore: false };
+    return { profiles: previewProfiles, canRestore: false, officialLoginActive: previewOfficialLoginActive };
   },
   async createProfile(draft: ProfileDraft): Promise<ProfileSummary> {
     if (isTauri) return invoke<ProfileSummary>("create_profile", { draft });
@@ -221,7 +222,7 @@ export const api = {
   },
   async importProfiles(): Promise<Bootstrap> {
     if (isTauri) return invoke<Bootstrap>("import_profiles");
-    return { profiles: previewProfiles, canRestore: false };
+    return { profiles: previewProfiles, canRestore: false, officialLoginActive: previewOfficialLoginActive };
   },
   async importCurrent(): Promise<ProfileSummary> {
     if (isTauri) return invoke<ProfileSummary>("import_current");
@@ -347,6 +348,7 @@ export const api = {
   },
   async prepareApply(profileId: string): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("prepare_apply", { profileId });
+    previewOfficialLoginActive = false;
     const target = previewProfiles.find((profile) => profile.id === profileId);
     if (target) previewLiveProfile = { ...target, isActive: true, applyState: "applied" };
     previewProfiles = previewProfiles.map((profile) => ({
@@ -358,6 +360,7 @@ export const api = {
   },
   async prepareOfficialLogin(): Promise<ApplyResponse> {
     if (isTauri) return invoke<ApplyResponse>("prepare_official_login");
+    previewOfficialLoginActive = true;
     previewProfiles = previewProfiles.map((profile) => ({
       ...profile,
       isActive: false,

@@ -28,6 +28,7 @@ export type ProfileSummary = {
 export type Bootstrap = {
   profiles: ProfileSummary[];
   canRestore: boolean;
+  officialLoginActive: boolean;
   startupMessage?: string;
 };
 
@@ -203,9 +204,9 @@ export type Confirmation = {
 };
 
 export type ApplyResponse =
-  | { kind: "applied"; activeProfileId: string; warning?: string }
+  | { kind: "applied"; activeProfileId: string; warning?: string; restartRequired?: boolean }
   | { kind: "requires_confirmation"; confirmation: Confirmation }
   | { kind: "imported_current"; profile: ProfileSummary; warning?: string }
   | { kind: "restored"; activeProfileId?: string; warning?: string }
-  | { kind: "official_login_restored"; warning?: string }
+  | { kind: "official_login_restored"; warning?: string; restartRequired?: boolean }
   | { kind: "context_saved"; context: ContextView; warning?: string };
